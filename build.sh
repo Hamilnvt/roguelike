@@ -2,4 +2,4 @@
 
 clear
 
-gcc -o roguelike main.c -lncurses -lm -Wall -Wextra -Werror -Wno-switch -Wno-discarded-qualifiers -ggdb
+gcc -o roguelike main.c -lncurses -lm -Wall -Wextra -Werror -Wswitch-enum -Wno-discarded-qualifiers -ggdb

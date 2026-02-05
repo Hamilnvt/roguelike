@@ -27,12 +27,18 @@ static inline bool strneq(const char *s1, const char *s2, size_t n) { return str
 
 #define BOOL_AS_CSTR(value) ((value) ? "true" : "false")
 
-typedef struct
+_Noreturn void print_error_and_exit(const char *fmt, ...)
 {
-    char **items;
-    size_t count;
-    size_t capacity;
-} Strings;
+    va_list ap;
+    va_start(ap, fmt);
+    clear();
+    printw("ERROR: ");
+    vw_printw(stdscr, fmt, ap);
+    refresh();
+    nodelay(stdscr, FALSE);
+    getch();
+    exit(1);
+}
 
 typedef struct
 {
@@ -45,11 +51,26 @@ typedef enum
     RANK_1,
     RANK_2,
     RANK_3,
-    RANK_KING
+    RANK_KING,
+    ENTITY_RANKS_COUNT
 } EntityRank;
 
-typedef struct Entity Entity;
-typedef void (* Effect) (Entity *self, Entity *entities, size_t entities_count);
+char entity_rank_char(EntityRank r)
+{
+    switch (r)
+    {
+    case RANK_1:    return '1';
+    case RANK_2:    return '2';
+    case RANK_3:    return '3';
+    case RANK_KING: return 'K';
+
+    case ENTITY_RANKS_COUNT:
+    default: print_error_and_exit("Unreachable entity rank %u", r);
+    }
+}
+
+typedef struct Cell Cell;
+typedef void (* Effect) (Cell *self, Cell *cells, size_t width, size_t height);
 
 typedef struct
 {
@@ -70,48 +91,209 @@ typedef struct Entity
     Effects effects; 
 } Entity;
 
-typedef struct
+//   0 1 2 3
+// 0 @     -
+// 1     1 -
+// 2   K   -
+// 3 - - - -
+
+typedef enum
 {
-    Entity *items;
-    size_t count;
-    size_t capacity;
-} Entities;
+    CELL_BLANK = 0,
+    CELL_PLAYER,
+    CELL_ENTITY,
+    CELL_WALL,
+    CELL_DOOR
+} CellType;
 
 typedef struct
 {
-    Entity self;
-    int xp;
+    Cursor pos;
+    bool destructible;
+} Wall;
+
+typedef struct Room Room;
+typedef struct
+{
+    Cursor pos;
+    bool openable;
+    bool open;
+    Room *to;
+} Door;
+
+typedef struct Cell
+{
+    CellType type;
+    Cursor pos;
+    union {
+        Entity *entity;
+        Wall *wall;
+        Door *door;
+    };
+} Cell;
+
+char cell_char(Cell cell)
+{
+    switch (cell.type)
+    {
+    case CELL_BLANK:  return ' ';
+    case CELL_PLAYER: return '@';
+    case CELL_ENTITY: return entity_rank_char(cell.entity->rank);
+    case CELL_WALL:   return '#';
+    case CELL_DOOR:   return 'O';
+    default: print_error_and_exit("Unreachable cell type %u in cell_char", cell.type);
+    }
+}
+
+static inline Cell make_cell_entity(Entity *e)
+{
+    return (Cell){
+        .type = CELL_ENTITY,
+        .entity = e,
+        .pos = e->pos
+    };
+}
+
+static inline Cell make_cell_entity_random_at(size_t x, size_t y)
+{
+    Entity *e = malloc(sizeof(Entity));
+    memcpy(e->name, "Entity", 6); // TODO: random name based on rank
+    e->pos = (Cursor){x, y};
+    // TODO:
+       // > if an entity spawns on top of another entity it triggers some event:
+       //   - on player: ambush
+       //   - on another entity: combat
+       // > maybe it's better to have a fixed grid rather than a dynamic array, so that I can easily check if the slot is already occupied
+       //   - I can then create rooms with walls and whatnot (screen is then a graphical representation of the grid)
+       //   - If slot is, say, -1 then it's not possible to spawn an entity there, try again...
+    e->rank = rand() % ENTITY_RANKS_COUNT;
+    e->level = rand() % (10*(e->rank+1));
+    e->chance = rand() % (100*(e->rank+1));
+    e->attack = rand() % (100*(e->rank+1));
+
+    return make_cell_entity(e);
+}
+
+static inline Cell make_cell_entity_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
+{
+    size_t x = (rand() % (x_high - x_low)) + x_low;
+    size_t y = (rand() % (y_high - y_low)) + y_low;
+    return make_cell_entity_random_at(x, y);
+}
+
+static inline Cell make_cell_wall(Wall *w)
+{
+    return (Cell){
+        .type = CELL_WALL,
+        .wall = w,
+        .pos = w->pos
+    };
+}
+
+static inline Cell make_cell_wall_random_at(size_t x, size_t y)
+{
+    Wall *w = malloc(sizeof(Wall));
+    w->pos = (Cursor){x, y};
+    w->destructible = rand()%2;
+    return make_cell_wall(w);
+}
+
+static inline Cell make_cell_wall_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
+{
+    size_t x = (rand() % (x_high - x_low)) + x_low;
+    size_t y = (rand() % (y_high - y_low)) + y_low;
+    return make_cell_wall_random_at(x, y);
+}
+
+static inline Cell make_cell_door(Door *d)
+{
+    return (Cell){
+        .type = CELL_DOOR,
+        .door = d,
+        .pos = d->pos
+    };
+}
+
+static inline Cell make_cell_door_random_at(size_t x, size_t y)
+{
+    Door *d = malloc(sizeof(Door));
+    d->pos = (Cursor){x, y};
+    d->openable = true;
+    d->open = rand()%2;
+    d->to = NULL; // TODO
+    return make_cell_door(d);
+}
+
+static inline Cell make_cell_door_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
+{
+    size_t x = (rand() % (x_high - x_low)) + x_low;
+    size_t y = (rand() % (y_high - y_low)) + y_low;
+    return make_cell_door_random_at(x, y);
+}
+
+typedef struct Room
+{
+    Cell *cells;
+    size_t width;
+    size_t height;
+} Room;
+
+Room generate_room(size_t width, size_t height)
+{
+    Room room = {
+        .cells = malloc(sizeof(Cell)*width*height),
+        .width = width,
+        .height = height
+    };
+    int doors_count = (rand() % 2) + 1;
+    int entities_count = (rand() % 10) + 1;
+    for (size_t y = 0; y < height; y++) {
+        for (size_t x = 0; x < width; x++) {
+            size_t index = y*width + x;
+            if (x == 0 || y == 0 || x == width-1 || y == height-1) {
+                room.cells[index] = make_cell_wall_random_at(x, y);
+            } else if (doors_count > 0) {
+                room.cells[index] = make_cell_door_random_at(x, y);
+                doors_count--;
+            } else if (entities_count > 0) {
+                room.cells[index] = make_cell_entity_random_at(x, y);
+                entities_count--;
+            }
+        }
+    }
+    return room;
+}
+
+typedef struct
+{
+    Room *items;
+    size_t count;
+    size_t capacity;
+} Rooms;
+
+typedef struct
+{
+    Entity *self;
+    size_t xp;
 } Player;
 
 typedef struct
 {
     Player player;
     float total_time;
-    Entities entities;
+    Rooms rooms;
 } Data;
 
 typedef struct
 {
     Data data;
+    Room *current_room;
     float save_timer;
     char message[256];
 } Game;
 static Game game = {0};
 
-static inline Cursor *get_player_pos(void) { return &game.data.player.self.pos; }
-
-_Noreturn void print_error_and_exit(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    clear();
-    printw("ERROR: ");
-    vw_printw(stdscr, fmt, ap);
-    refresh();
-    nodelay(stdscr, FALSE);
-    getch();
-    exit(1);
-}
+static inline Cursor *get_player_pos(void) { return &game.data.player.self->pos; }
 
 const char *logpath = "./log.txt";
 void log_this(char *format, ...)
@@ -142,21 +324,38 @@ void write_message(const char *fmt, ...)
     log_this("MESSAGE: %s", game.message);
 }
 
-#define da_read_from_file(da, Type, file)                \
-    do {                                                 \
-        size_t count;                                    \
-        fread(&count, sizeof(size_t), 1, (file));        \
-        (da)->items = malloc(count * sizeof(Type));      \
-        (da)->count = count;                             \
-        (da)->capacity = count;                          \
-        fread((da)->items, sizeof(Type), count, (file)); \
-    } while (0)
+void spawn_random_entity(void)
+{
+    int tries = 10;
+    size_t x;
+    size_t y;
+    while (tries > 0) {
+        x = rand() % game.current_room->width;
+        y = rand() % game.current_room->height;
+        Cell cell = game.current_room->cells[y*game.current_room->width + x];
+        if (cell.type == CELL_BLANK || cell.type == CELL_ENTITY) {
+            make_cell_entity_random_at(x, y);
+            return;
+        } else tries--;
+    }
+}
 
-#define da_write_to_file(da, Type, file)                         \
-    do {                                                         \
-        fwrite(&(da)->count, sizeof(size_t), 1, (file));         \
-        fwrite(&(da)->items, sizeof(Type), (da)->count, (file)); \
-    } while (0)
+void save_entity(FILE *f, Entity *e)
+{
+    // Name
+    fwrite(e->name, sizeof(char), sizeof(e->name), f);
+    
+    // POD
+    fwrite(&e->pos,    sizeof(Cursor),     1, f);
+    fwrite(&e->rank,   sizeof(EntityRank), 1, f);
+    fwrite(&e->level,  sizeof(size_t),     1, f);
+    fwrite(&e->chance, sizeof(int),        1, f);
+    fwrite(&e->attack, sizeof(int),        1, f);
+    
+    // Effects TODO
+    // 3. IMPORTANT: Do NOT write the 'effects' struct directly.
+    // It contains pointers. For now, we skip it.
+}
 
 #define SAVE_FILEPATH "./save.bin"
 bool save_game_data(void)
@@ -164,12 +363,42 @@ bool save_game_data(void)
     FILE *save_file = fopen(SAVE_FILEPATH, "wb");    
     if (!save_file) return false;
 
-    fwrite(&game.data.player, sizeof(Player), 1, save_file);
+    // Player
+    save_entity(save_file, game.data.player.self);
+    fwrite(&game.data.player.xp, sizeof(size_t), 1, save_file);
+
+    // POD
     fwrite(&game.data.total_time, sizeof(float), 1, save_file);
-    da_write_to_file(&game.data.entities, Entity, save_file);
+
+    // Rooms TODO
+    //fwrite(&game.data.entities.count, sizeof(size_t), 1, save_file);
+    //da_foreach (game.data.entities, Entity*, e)
+    //    save_entity(save_file, *e);
 
     fclose(save_file);
     write_message("saved");
+    return true;
+}
+
+bool load_entity(FILE  *f, Entity *e)
+{
+    // Name
+    if (fread(e->name, sizeof(char), sizeof(e->name), f) != sizeof(e->name)) return false;
+
+    // POD
+    if (fread(&e->pos,    sizeof(Cursor),     1, f) != 1) return false;
+    log_this("Loaded entity position (%zu, %zu)", e->pos.x, e->pos.y);
+    if (fread(&e->rank,   sizeof(EntityRank), 1, f) != 1) return false;
+    if (fread(&e->level,  sizeof(size_t),     1, f) != 1) return false;
+    if (fread(&e->chance, sizeof(int),        1, f) != 1) return false;
+    if (fread(&e->attack, sizeof(int),        1, f) != 1) return false;
+
+    // Effects TODO
+    // Reset pointers to NULL to prevent crashes
+    e->effects.items = NULL;
+    e->effects.count = 0;
+    e->effects.capacity = 0;
+
     return true;
 }
 
@@ -177,16 +406,36 @@ bool load_game_data(void)
 {
     FILE *save_file = fopen(SAVE_FILEPATH, "rb");    
     if (!save_file) {
-        if (errno == ENOENT) save_game_data();
+        if (errno == ENOENT) return save_game_data();
         else return false;
     }
 
-    fread(&game.data.player, sizeof(Player), 1, save_file);
-    fread(&game.data.total_time, sizeof(float), 1, save_file);
-    da_read_from_file(&game.data.entities, Entity, save_file);
+    // Player
+    if (!load_entity(save_file, game.data.player.self)) goto fail;
+    log_this("it was player's position");
+    if (fread(&game.data.player.xp, sizeof(size_t), 1, save_file) != 1) goto fail;
+
+    // POD
+    if (fread(&game.data.total_time, sizeof(float), 1, save_file) != 1) goto fail;
+
+    // Rooms TODO
+    //da_clear(&game.data.entities);
+    //size_t count = 0;
+    //if (fread(&count, sizeof(size_t), 1, save_file) != 1) goto fail;
+    //if (count > 0) {
+    //    game.data.entities.count = count;
+    //    game.data.entities.capacity = count;
+    //    game.data.entities.items = malloc(count * sizeof(Entity));
+    //    da_foreach (game.data.entities, Entity*, e)
+    //        if (!load_entity(save_file, *e)) goto fail;
+    //}
 
     fclose(save_file);
     return true;
+
+fail:
+    fclose(save_file);
+    return false;
 }
 
 #define SAVE_TIME_INTERVAL 15.f
@@ -195,7 +444,7 @@ void advance_save_timer(float dt)
     game.save_timer += dt;
     if (game.save_timer >= SAVE_TIME_INTERVAL) {
         game.save_timer = 0.f;
-        save_game_data();
+        if (!save_game_data()) print_error_and_exit("Could not save game");
     }
 }
 
@@ -219,17 +468,8 @@ typedef enum
 typedef enum
 {
     KEY_NULL  = 0,
-    CTRL_H    = 8,
     TAB       = 9,
-    CTRL_J    = 10,
-    CTRL_K    = 11,
-    CTRL_L    = 12,
     ENTER     = 13,
-    CTRL_M    = 13,
-    CTRL_N    = 14,
-    CTRL_P    = 16,
-    CTRL_Q    = 17,
-    CTRL_S    = 19,
     ESC       = 27,
 
     ALT_0     = 1000,
@@ -260,6 +500,7 @@ typedef enum
     ALT_p,
 
     CTRL_ALT_C,
+    CTRL_ALT_E,
     CTRL_ALT_K,
     CTRL_ALT_J,
     CTRL_ALT_H,
@@ -306,6 +547,7 @@ Window create_window(int h, int w, int y, int x, int color_pair)
 
 void create_windows(void)
 {
+    get_screen_size();
     win_main = create_window(screen_rows, screen_cols, 0, 0, R_PAIR);
 }
 
@@ -328,7 +570,7 @@ void ncurses_end(void)
 
 void cleanup_on_terminating_signal(int sig)
 {
-    log_this("Program received signal %d", sig);
+    log_this("Program received signal %d: %s", sig, strsignal(sig));
     ncurses_end();
     exit(1);
 }
@@ -421,6 +663,7 @@ int read_key()
         case ':'          : return ALT_COLON;
 
         case CTRL('C'): return CTRL_ALT_C;
+        case CTRL('E'): return CTRL_ALT_E;
         case CTRL('K'): return CTRL_ALT_K;
         case CTRL('J'): return CTRL_ALT_J;
         case CTRL('H'): return CTRL_ALT_H;
@@ -432,9 +675,13 @@ int read_key()
 
 void update_window_main(void) {
     box(win_main.win, 0, 0);
-    Cursor *player_pos = get_player_pos();
-    mvwaddch(win_main.win, player_pos->y, player_pos->x, '@');
-    mvwprintw(win_main.win, 0, 0, "Player '%s'", game.data.player.self.name);
+
+    for (size_t i = 0; i < game.current_room->width*game.current_room->height; i++) {
+        Cell cell = game.current_room->cells[i];
+        mvwaddch(win_main.win, cell.pos.y+1, cell.pos.x+1, cell_char(cell));
+    }
+
+    mvwprintw(win_main.win, 0, 0, "Player '%s'", game.data.player.self->name);
     if (strlen(game.message)) mvwprintw(win_main.win, win_main.height-2, 0, "Message: %s", game.message);
     mvwprintw(win_main.win, win_main.height-1, 0, "Total time: %.3f", game.data.total_time);
 }
@@ -476,9 +723,30 @@ void handle_sigwinch(int signo)
 
 void game_init()
 {
-    load_game_data();
-    get_screen_size();
-    signal(SIGWINCH, handle_sigwinch);
+    //load_game_data(); // TODO rimetti
+
+    // TODO: poi verranno caricati dal file di salvataggio
+    {
+        game.data.player = (Player){0};
+
+        Entity *e = malloc(sizeof(Entity));
+        memcpy(e->name, "Adventurer", 10);
+        size_t player_x = 20;
+        size_t player_y = 20;
+        e->pos = (Cursor){player_x, player_y};
+        e->rank = RANK_1;
+        e->level = 1;
+        e->chance = 50;
+        e->attack = 10;
+        e->effects = (Effects){0}; 
+        game.data.player.self = e;
+
+        Room initial_room = generate_room(win_main.width-2, win_main.height-2);
+        size_t player_index = player_y*initial_room.width + player_x;
+        initial_room.cells[player_index] = (Cell){ .type = CELL_PLAYER, .pos = e->pos }; // TODO: devo controllare che non ci fosse qualcos'altro e fare una free altrimenti leako un po' di memoria
+        da_push(&game.data.rooms, initial_room);
+        game.current_room = &game.data.rooms.items[0];
+    }
 }
 
 void itoa(int n, char *buf)
@@ -501,22 +769,22 @@ void itoa(int n, char *buf)
 static inline void move_cursor_up(void)
 {
     Cursor *player_pos = get_player_pos();
-    if (player_pos->y > 0) player_pos->y--;
+    if (player_pos->y > 1) player_pos->y--;
 }
 static inline void move_cursor_down(void)
 {
     Cursor *player_pos = get_player_pos();
-    if (player_pos->y < screen_rows-1) player_pos->y++;
+    if (player_pos->y < screen_rows-2) player_pos->y++;
 }
 static inline void move_cursor_left(void)
 {
     Cursor *player_pos = get_player_pos();
-    if (player_pos->x > 0) player_pos->x--;
+    if (player_pos->x > 1) player_pos->x--;
 }
 static inline void move_cursor_right(void)
 {
     Cursor *player_pos = get_player_pos();
-    if (player_pos->x < screen_cols-1) player_pos->x++;
+    if (player_pos->x < screen_cols-2) player_pos->x++;
 }
 
 bool can_quit(void) { return true; }
@@ -546,12 +814,21 @@ void process_pressed_key(void)
         case 'd':
         case KEY_RIGHT: move_cursor_right(); break;
 
-        case CTRL_Q:
-            if (can_quit()) quit();
+        case CTRL('E'):
+            spawn_random_entity();
             break;
 
-        case CTRL_S:
-            save_game_data();
+        case CTRL_ALT_E:
+            // TODO: I have to free all the entities
+            write_message("TODO: clear all entities");
+            break;
+
+        case CTRL('S'):
+            if (!save_game_data()) print_error_and_exit("Could not save game");
+            break;
+
+        case CTRL('Q'):
+            if (can_quit()) quit();
             break;
 
         //case ALT_0:
@@ -582,10 +859,6 @@ void process_pressed_key(void)
         //case ALT_c:
         //case ALT_C:
         //case CTRL_ALT_C:
-        //case CTRL_K:
-        //case CTRL_J:
-        //case CTRL_H:
-        //case CTRL_L:
         //case KEY_PPAGE:
         //case CTRL_ALT_K:
         //case KEY_NPAGE:
@@ -609,10 +882,14 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+    srand(time(NULL));
+    signal(SIGWINCH, handle_sigwinch);
     ncurses_init();
-    game_init();
     initialize_colors();
     create_windows();
+    game_init();
+
+    //memcpy(game.data.player.self->name, "Hamilnvt", 8);
 
     float current_time = get_time_in_seconds();
     float last_time = current_time;
@@ -629,7 +906,7 @@ int main(int argc, char **argv)
         update_cursor();
         doupdate();
 
-        advance_save_timer(dt);
+        //advance_save_timer(dt); // TODO rimetti
     }
 
     return 0;
