@@ -1,9 +1,24 @@
+/* Ideas
+ * - name: Dead Kings
+ * - features:
+ *   > the monsters you fight are divided into an hierarchy (at the top lie the Dead Kings)
+ *      - each rank has some properties (from lesser to stronger + some other stuff
+ *      - if a monster kills you it can rank up
+ *      - if you kill a monster you can decide what to do with him
+ *          > reclute it
+ *          > kill it
+ *          > downrank it
+*/
+
 #include <string.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <termios.h>
 #include <ncurses.h>
 #include <ctype.h>
+#include <errno.h>
+#include <time.h>
+#include "dynamic_arrays.h"
 
 #define DEBUG true
 
@@ -24,7 +39,172 @@ typedef struct
     size_t x;
     size_t y;
 } Cursor;
-static Cursor cursor = {0};
+
+typedef enum
+{
+    RANK_1,
+    RANK_2,
+    RANK_3,
+    RANK_KING
+} EntityRank;
+
+typedef struct Entity Entity;
+typedef void (* Effect) (Entity *self, Entity *entities, size_t entities_count);
+
+typedef struct
+{
+    Effect *items; 
+    size_t count;
+    size_t capacity;
+} Effects;
+
+#define ENTITY_NAME_MAX_LEN 31
+typedef struct Entity
+{
+    char name[ENTITY_NAME_MAX_LEN + 1];
+    Cursor pos;
+    EntityRank rank;
+    size_t level;
+    int chance;
+    int attack;
+    Effects effects; 
+} Entity;
+
+typedef struct
+{
+    Entity *items;
+    size_t count;
+    size_t capacity;
+} Entities;
+
+typedef struct
+{
+    Entity self;
+    int xp;
+} Player;
+
+typedef struct
+{
+    Player player;
+    float total_time;
+    Entities entities;
+} Data;
+
+typedef struct
+{
+    Data data;
+    float save_timer;
+    char message[256];
+} Game;
+static Game game = {0};
+
+static inline Cursor *get_player_pos(void) { return &game.data.player.self.pos; }
+
+_Noreturn void print_error_and_exit(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    clear();
+    printw("ERROR: ");
+    vw_printw(stdscr, fmt, ap);
+    refresh();
+    nodelay(stdscr, FALSE);
+    getch();
+    exit(1);
+}
+
+const char *logpath = "./log.txt";
+void log_this(char *format, ...)
+{
+    if (!DEBUG) return;
+
+    FILE *logfile = fopen(logpath, "a");
+    if (logfile == NULL) {
+        print_error_and_exit("Could not open log file at `%s`\n", logpath);
+    }
+    va_list fmt; 
+
+    va_start(fmt, format);
+    vfprintf(logfile, format, fmt);
+    fprintf(logfile, "\n");
+
+    va_end(fmt);
+    fclose(logfile);
+}
+
+void write_message(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    memset(game.message, 0, sizeof(game.message));
+    vsnprintf(game.message, sizeof(game.message), fmt, ap);
+    va_end(ap);
+    log_this("MESSAGE: %s", game.message);
+}
+
+#define da_read_from_file(da, Type, file)                \
+    do {                                                 \
+        size_t count;                                    \
+        fread(&count, sizeof(size_t), 1, (file));        \
+        (da)->items = malloc(count * sizeof(Type));      \
+        (da)->count = count;                             \
+        (da)->capacity = count;                          \
+        fread((da)->items, sizeof(Type), count, (file)); \
+    } while (0)
+
+#define da_write_to_file(da, Type, file)                         \
+    do {                                                         \
+        fwrite(&(da)->count, sizeof(size_t), 1, (file));         \
+        fwrite(&(da)->items, sizeof(Type), (da)->count, (file)); \
+    } while (0)
+
+#define SAVE_FILEPATH "./save.bin"
+bool save_game_data(void)
+{
+    FILE *save_file = fopen(SAVE_FILEPATH, "wb");    
+    if (!save_file) return false;
+
+    fwrite(&game.data.player, sizeof(Player), 1, save_file);
+    fwrite(&game.data.total_time, sizeof(float), 1, save_file);
+    da_write_to_file(&game.data.entities, Entity, save_file);
+
+    fclose(save_file);
+    write_message("saved");
+    return true;
+}
+
+bool load_game_data(void)
+{
+    FILE *save_file = fopen(SAVE_FILEPATH, "rb");    
+    if (!save_file) {
+        if (errno == ENOENT) save_game_data();
+        else return false;
+    }
+
+    fread(&game.data.player, sizeof(Player), 1, save_file);
+    fread(&game.data.total_time, sizeof(float), 1, save_file);
+    da_read_from_file(&game.data.entities, Entity, save_file);
+
+    fclose(save_file);
+    return true;
+}
+
+#define SAVE_TIME_INTERVAL 15.f
+void advance_save_timer(float dt)
+{
+    game.save_timer += dt;
+    if (game.save_timer >= SAVE_TIME_INTERVAL) {
+        game.save_timer = 0.f;
+        save_game_data();
+    }
+}
+
+float get_time_in_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (float)ts.tv_sec + ((float)ts.tv_nsec / 1e9);
+}
 
 /* Colors */
 typedef enum
@@ -100,48 +280,6 @@ typedef struct
 
 static Window win_main = {0};
 
-_Noreturn void print_error_and_exit(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    clear();
-    printw("ERROR: ");
-    vw_printw(stdscr, fmt, ap);
-    refresh();
-    nodelay(stdscr, FALSE);
-    getch();
-    exit(1);
-}
-
-const char *logpath = "./log.txt";
-void log_this(char *format, ...)
-{
-    if (!DEBUG) return;
-
-    FILE *logfile = fopen(logpath, "a");
-    if (logfile == NULL) {
-        print_error_and_exit("Could not open log file at `%s`\n", logpath);
-    }
-    va_list fmt; 
-
-    va_start(fmt, format);
-    vfprintf(logfile, format, fmt);
-    fprintf(logfile, "\n");
-
-    va_end(fmt);
-    fclose(logfile);
-}
-
-void write_message(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    char buf[1024] = {0};
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    log_this("MESSAGE: %s", buf);
-}
-
 /* Pairs */
 typedef enum
 {
@@ -197,6 +335,8 @@ void cleanup_on_terminating_signal(int sig)
 
 void ncurses_init(void)
 {
+    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
+
     initscr();
 
     curs_set(0);
@@ -292,7 +432,11 @@ int read_key()
 
 void update_window_main(void) {
     box(win_main.win, 0, 0);
-    mvwaddch(win_main.win, cursor.y, cursor.x, '@');
+    Cursor *player_pos = get_player_pos();
+    mvwaddch(win_main.win, player_pos->y, player_pos->x, '@');
+    mvwprintw(win_main.win, 0, 0, "Player '%s'", game.data.player.self.name);
+    if (strlen(game.message)) mvwprintw(win_main.win, win_main.height-2, 0, "Message: %s", game.message);
+    mvwprintw(win_main.win, win_main.height-1, 0, "Total time: %.3f", game.data.total_time);
 }
 
 #define update_window(window_name)           \
@@ -309,8 +453,9 @@ void update_windows(void)
 
 void update_cursor(void)
 {
-    size_t cy = cursor.y;
-    size_t cx = cursor.x;
+    Cursor *player_pos = get_player_pos();
+    size_t cy = player_pos->y;
+    size_t cx = player_pos->x;
     WINDOW *win = win_main.win;
 
     wmove(win, cy, cx);
@@ -324,14 +469,15 @@ void handle_sigwinch(int signo)
     destroy_windows();
     create_windows();
     
-    if (cursor.y >= win_main.height) cursor.y = win_main.height - 1;
-    if (cursor.x >= win_main.width) cursor.x = win_main.width - 1;
+    Cursor *player_pos = get_player_pos();
+    if (player_pos->y >= win_main.height) player_pos->y = win_main.height - 1;
+    if (player_pos->x >= win_main.width)  player_pos->x = win_main.width - 1;
 }
 
-void editor_init()
+void game_init()
 {
+    load_game_data();
     get_screen_size();
-
     signal(SIGWINCH, handle_sigwinch);
 }
 
@@ -352,10 +498,26 @@ void itoa(int n, char *buf)
     for (int i = 0; i < len; i++) buf[i] = tmp[len-i-1];
 }
 
-void move_cursor_up(void) { if (cursor.y > 0) cursor.y--; }
-void move_cursor_down(void) { if (cursor.y < screen_rows-1) cursor.y++; }
-void move_cursor_left(void) { if (cursor.x > 0) cursor.x--; }
-void move_cursor_right(void) { if (cursor.x < screen_cols-1) cursor.x++; }
+static inline void move_cursor_up(void)
+{
+    Cursor *player_pos = get_player_pos();
+    if (player_pos->y > 0) player_pos->y--;
+}
+static inline void move_cursor_down(void)
+{
+    Cursor *player_pos = get_player_pos();
+    if (player_pos->y < screen_rows-1) player_pos->y++;
+}
+static inline void move_cursor_left(void)
+{
+    Cursor *player_pos = get_player_pos();
+    if (player_pos->x > 0) player_pos->x--;
+}
+static inline void move_cursor_right(void)
+{
+    Cursor *player_pos = get_player_pos();
+    if (player_pos->x < screen_cols-1) player_pos->x++;
+}
 
 bool can_quit(void) { return true; }
 
@@ -386,6 +548,10 @@ void process_pressed_key(void)
 
         case CTRL_Q:
             if (can_quit()) quit();
+            break;
+
+        case CTRL_S:
+            save_game_data();
             break;
 
         //case ALT_0:
@@ -429,7 +595,6 @@ void process_pressed_key(void)
         //case TAB:
         //case KEY_BTAB:
         //case ENTER:
-        //case CTRL_S:
         //case KEY_BACKSPACE:
         //case ESC:
 
@@ -444,21 +609,28 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
 
-    log_this("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~");
-
     ncurses_init();
+    game_init();
     initialize_colors();
     create_windows();
 
+    float current_time = get_time_in_seconds();
+    float last_time = current_time;
+    float dt = 0.f;
+
     while (true) {
+        current_time = get_time_in_seconds();
+        dt = current_time - last_time;
+        last_time = current_time;
+        game.data.total_time += dt;
+
         process_pressed_key();
         update_windows();
         update_cursor();
         doupdate();
-    }
 
-    // NOTE: this code should be unreachable
-    ncurses_end();
+        advance_save_timer(dt);
+    }
 
     return 0;
 }
