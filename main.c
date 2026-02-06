@@ -13,6 +13,8 @@
  * - basic interactions
  *   > monster: attack (one from the player and one from the monster)
  *   > door: go to room
+ *   - an interaction happens when the player tries to move onto the tile
+ *   - possibility to just "look" at a tile to gather information
  * - make entities_map a map to a da of pointer to entities so that many entities can exist in the same tile
  * - when hovering on entities pressing 'i' shows their stats in the right window
  * - since now entities can stack, there's no need to check if two of them "collide" they are just put in the same tile
@@ -20,6 +22,8 @@
  *   > non openable doors can be opened by defeating a King in the room and lead to special rooms (?)
  * - invetory to store/equip items
  * - each step increments a "timer" and after some time some actions are performed (a monster moves, a new monster spawns, something good/bad happens)
+ * - clear entities_map at the end of the iteration and repopulate it at the beginning?
+ * - monsters in a new room spawn accordingly to player's level
 */
 
 #include <string.h>
@@ -208,10 +212,10 @@ typedef struct
 
 typedef struct
 {
-    Entity **items;
+    size_t *items;
     size_t count;
     size_t capacity;
-} EntitiesPtrs;
+} EntitiesIndices;
 
 char get_entity_char(Entity e)
 {
@@ -321,9 +325,10 @@ static inline Tile make_tile_door_random(void)
 
 typedef struct Room
 {
+    size_t index;
     TileMap tilemap;
     Entities entities;
-    EntitiesPtrs *entities_map;
+    EntitiesIndices *entities_map;
 } Room;
 
 typedef struct
@@ -365,7 +370,7 @@ typedef struct
     struct {
         bool enabled;
         size_t index;
-        EntitiesPtrs *entities;
+        EntitiesIndices *entities;
     } show_entities_info;
 } Game;
 static Game game = {0};
@@ -378,7 +383,7 @@ static inline Tile *get_tile_under_player(void)
     return &tile_at(game.current_room, pos->x, pos->y);
 }
 
-static inline EntitiesPtrs *get_entities_under_player(void)
+static inline EntitiesIndices *get_entities_under_player(void)
 {
     Cursor *pos = get_player_pos();
     return entities_at(game.current_room, pos->x, pos->y);
@@ -437,8 +442,8 @@ void spawn_random_entity(Room *room)
     if (!get_random_empty_entity_slot_as_cursor(room, &pos)) return;
     Entity e = make_entity_random_at(pos.x, pos.y);
     da_push(&room->entities, e);
-    EntitiesPtrs *entities = &room->entities_map[index_in_room(*room, pos.x, pos.y)];
-    da_push(entities, &room->entities.items[room->entities.count-1]);
+    EntitiesIndices *entities = &room->entities_map[index_in_room(*room, pos.x, pos.y)];
+    da_push(entities, room->entities.count-1);
 }
 
 Room generate_room(size_t width, size_t height)
@@ -450,7 +455,7 @@ Room generate_room(size_t width, size_t height)
             .height = height
         },
         .entities = (Entities){0},
-        .entities_map = malloc(sizeof(EntitiesPtrs)*width*height)
+        .entities_map = malloc(sizeof(EntitiesIndices)*width*height)
     };
 
     // TODO: si puo' migliorare questo loop
@@ -751,7 +756,7 @@ void update_window_main(void)
 void update_window_bottom(void)
 {
     Tile *tile = get_tile_under_player();
-    EntitiesPtrs *entities = get_entities_under_player();
+    EntitiesIndices *entities = get_entities_under_player();
 
     box(win_bottom.win, 0, 0);
 
@@ -781,7 +786,7 @@ void update_window_bottom(void)
     if (!da_is_empty(entities)) {
         mvwprintw(win_bottom.win, line++, 1, "with the welcoming presence of:");
         for (size_t i = 0; i < entities->count; i++) {
-            Entity *e = entities->items[i];
+            Entity *e = &game.current_room->entities.items[entities->items[i]];
             char entity_selected_char = game.show_entities_info.enabled
                 && i == game.show_entities_info.index ? '+' : '-';
             mvwprintw(win_bottom.win, line++, 1, "%c %s, %s level %zu", entity_selected_char, e->name,
@@ -821,7 +826,7 @@ void update_window_left(void)
         mvwprintw(win_right.win, line++, 1, "Total time: %.3f", game.data.total_time);
         if (strlen(game.message)) mvwprintw(win_right.win, line++, 1, "Message: %s", game.message);
     } else if (game.show_entities_info.enabled) {
-        show_entity_info(game.show_entities_info.entities->items[game.show_entities_info.index]);
+        show_entity_info(&game.current_room->entities.items[game.show_entities_info.entities->items[game.show_entities_info.index]]);
     } else {
         show_entity_info(&game.data.player.entity);
     }
@@ -1015,6 +1020,7 @@ void game_init()
         game.data.player.entity = e;
 
         Room initial_room = generate_room(win_main.width, win_main.height);
+        initial_room.index = 0;
         da_push(&game.data.rooms, initial_room);
         game.current_room = &game.data.rooms.items[0];
 
@@ -1061,6 +1067,7 @@ static inline void move_entity(Entity *e, int dx, int dy)
     }
 }
 
+// TODO: change logic here, if player moves onto a door, they interact with it, but stand still
 static inline void move_player(int dx, int dy) { move_entity(&game.data.player.entity, dx, dy); }
 
 void interact(void)
@@ -1085,10 +1092,13 @@ void interact(void)
                 game.data.player.entity.pos = pos;
             } else {
                 Room room = generate_room(win_main.width, win_main.height);
+                room.index = game.data.rooms.count;
                 da_push(&game.data.rooms, room);
+                int previous_room_index = game.current_room->index;
                 game.current_room = &game.data.rooms.items[game.data.rooms.count-1];
-                int previous_room_index = door->leads_to;
                 door->leads_to = game.data.rooms.count-1;
+                // TODO: player position when coming back should be the one of the door from which they exited through;
+                // (sono stanco, non so cosa ho scritto, buona notte)
 
                 Cursor pos;
                 if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
@@ -1110,7 +1120,7 @@ void interact(void)
         print_error_and_exit("Unreachable tile type %u in interact", tile->type);
     }
 
-    EntitiesPtrs *entities = get_entities_under_player();
+    EntitiesIndices *entities = get_entities_under_player();
     // TODO: show options, but for now:
     if (!da_is_empty(entities)) {
         if (!game.show_entities_info.enabled) {
@@ -1129,8 +1139,6 @@ void interact(void)
         }
     }
 }
-
-bool can_quit(void) { return true; }
 
 _Noreturn void quit(void)
 {
@@ -1179,8 +1187,8 @@ void process_pressed_key(void)
             break;
 
         case CTRL('Q'):
-            if (can_quit()) quit();
-            break;
+            if (save_game_data()) quit();
+            else print_error_and_exit("Could not save game");
 
         case ESC:
             if (game.show_entities_info.enabled) {
@@ -1261,6 +1269,8 @@ int main(int argc, char **argv)
         doupdate();
 
         //advance_save_timer(dt); // TODO rimetti
+
+        napms(16); // TODO: do it with the calculated dt
     }
 
     return 0;
