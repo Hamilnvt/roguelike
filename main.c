@@ -8,6 +8,18 @@
  *          > reclute it
  *          > kill it
  *          > downrank it
+ * 
+ * Todos
+ * - basic interactions
+ *   > monster: attack (one from the player and one from the monster)
+ *   > door: go to room
+ * - make entities_map a map to a da of pointer to entities so that many entities can exist in the same tile
+ * - when hovering on entities pressing 'i' shows their stats in the right window
+ * - since now entities can stack, there's no need to check if two of them "collide" they are just put in the same tile
+ * - monsters drop key to open doors
+ *   > non openable doors can be opened by defeating a King in the room and lead to special rooms (?)
+ * - invetory to store/equip items
+ * - each step increments a "timer" and after some time some actions are performed (a monster moves, a new monster spawns, something good/bad happens)
 */
 
 #include <string.h>
@@ -26,6 +38,13 @@ static inline bool streq(const char *s1, const char *s2) { return strcmp(s1, s2)
 static inline bool strneq(const char *s1, const char *s2, size_t n) { return strncmp(s1, s2, n) == 0; }
 
 #define BOOL_AS_CSTR(value) ((value) ? "true" : "false")
+
+#define index(x, y, width) ((y)*(width) + (x))
+#define at(A, x, y, width) ((A)[index(x, y, width)])
+#define index_in_room(room, x, y) ((y)*(room).tilemap.width + (x))
+#define tile_at(room, x, y) (at((room)->tilemap.tiles, (x), (y), (room)->tilemap.width))
+#define room_tiles_count(room) ((room)->tilemap.width*(room)->tilemap.height)
+#define entities_at(room, x, y) (&(at((room)->entities_map, (x), (y), (room)->tilemap.width)))
 
 _Noreturn void print_error_and_exit(const char *fmt, ...)
 {
@@ -48,29 +67,67 @@ typedef struct
 
 typedef enum
 {
-    RANK_1,
-    RANK_2,
-    RANK_3,
+    RANK_CIVILIAN,
+    RANK_WARRIOR,
+    RANK_NOBLE,
     RANK_KING,
+    RANK_DEMON,
+    RANK_GOD,
     ENTITY_RANKS_COUNT
 } EntityRank;
 
-char entity_rank_char(EntityRank r)
+char *entity_rank_to_string(EntityRank rank)
 {
-    switch (r)
+    switch (rank)
     {
-    case RANK_1:    return '1';
-    case RANK_2:    return '2';
-    case RANK_3:    return '3';
-    case RANK_KING: return 'K';
+    case RANK_CIVILIAN: return "Civilian";
+    case RANK_WARRIOR:  return "Warrior";
+    case RANK_NOBLE:    return "Noble";
+    case RANK_KING:     return "King";
+    case RANK_DEMON:    return "Demon";
+    case RANK_GOD:      return "God";
 
     case ENTITY_RANKS_COUNT:
-    default: print_error_and_exit("Unreachable entity rank %u", r);
+    default: print_error_and_exit("Unreachable entity rank %u in entity_rank_to_string", rank);
     }
 }
 
-typedef struct Cell Cell;
-typedef void (* Effect) (Cell *self, Cell *cells, size_t width, size_t height);
+typedef enum
+{
+    TILE_FLOOR,
+    TILE_WALL,
+    TILE_DOOR,
+    TILES_COUNT
+} TileType;
+
+typedef struct
+{
+    TileType type;
+    union {
+       bool destructible; // Wall
+       struct {           // Door
+           bool openable;
+           bool open;
+           int leads_to;
+       };
+    };
+} Tile;
+
+typedef struct
+{
+    size_t width;
+    size_t height;
+    Tile *tiles;
+} TileMap;
+
+typedef struct Room Room;
+typedef void (* EffectAction) (Room *room);
+
+typedef struct
+{
+    char name[32];
+    EffectAction action;
+} Effect;
 
 typedef struct
 {
@@ -79,6 +136,51 @@ typedef struct
     size_t capacity;
 } Effects;
 
+typedef enum
+{
+    ITEM_HELMET,
+    ITEM_HAT,
+    ITEM_GOGGLES,
+    ITEM_SCARF,
+    ITEM_CHESTPLATE,
+    ITEM_CHAUSSES,
+    ITEM_SHOES,
+    ITEM_GLOVE,
+    ITEM_SWORD,
+    ITEM_SHIELD,
+    ITEM_SCROLL,
+    ITEM_STAFF,
+    ITEM_TYPES_COUNT
+} ItemType;
+
+#define ITEM_NAME_MAX_LEN 31
+typedef struct
+{
+    ItemType type;
+    char name[ITEM_NAME_MAX_LEN + 1];
+    int durability;
+
+    int attack;
+    int chance;
+    int hp;
+    int defense;
+    int agility;
+    Effects effects;
+} Item;
+
+typedef struct
+{
+    ItemType type;
+    Item item;
+} ItemSlot;
+
+typedef struct
+{
+    ItemSlot *items;
+    size_t count;
+    size_t capacity;
+} Equipment;
+
 #define ENTITY_NAME_MAX_LEN 31
 typedef struct Entity
 {
@@ -86,79 +188,78 @@ typedef struct Entity
     Cursor pos;
     EntityRank rank;
     size_t level;
+
+    Equipment equipment;
+
+    int hp;
+    int defense;
     int chance;
     int attack;
+    int agility;
     Effects effects; 
 } Entity;
 
-//   0 1 2 3
-// 0 @     -
-// 1     1 -
-// 2   K   -
-// 3 - - - -
-
-typedef enum
+typedef struct
 {
-    CELL_BLANK = 0,
-    CELL_PLAYER,
-    CELL_ENTITY,
-    CELL_WALL,
-    CELL_DOOR
-} CellType;
+    Entity *items;
+    size_t count;
+    size_t capacity;
+} Entities;
 
 typedef struct
 {
-    Cursor pos;
-    bool destructible;
-} Wall;
+    Entity **items;
+    size_t count;
+    size_t capacity;
+} EntitiesPtrs;
 
-typedef struct Room Room;
-typedef struct
+char get_entity_char(Entity e)
 {
-    Cursor pos;
-    bool openable;
-    bool open;
-    Room *to;
-} Door;
-
-typedef struct Cell
-{
-    CellType type;
-    Cursor pos;
-    union {
-        Entity *entity;
-        Wall *wall;
-        Door *door;
-    };
-} Cell;
-
-char cell_char(Cell cell)
-{
-    switch (cell.type)
+    switch (e.rank)
     {
-    case CELL_BLANK:  return ' ';
-    case CELL_PLAYER: return '@';
-    case CELL_ENTITY: return entity_rank_char(cell.entity->rank);
-    case CELL_WALL:   return '#';
-    case CELL_DOOR:   return 'O';
-    default: print_error_and_exit("Unreachable cell type %u in cell_char", cell.type);
+    case RANK_CIVILIAN: return 'c';
+    case RANK_WARRIOR:  return 'w';
+    case RANK_NOBLE:    return 'N';
+    case RANK_KING:     return 'K';
+    case RANK_DEMON:    return 'D';
+    case RANK_GOD:      return 'G';
+
+    case ENTITY_RANKS_COUNT:
+    default: print_error_and_exit("Unreachable entity rank %u in get_entity_char", e.rank);
     }
 }
 
-static inline Cell make_cell_entity(Entity *e)
+char get_tile_char(Tile tile)
 {
-    return (Cell){
-        .type = CELL_ENTITY,
-        .entity = e,
-        .pos = e->pos
-    };
+    switch (tile.type)
+    {
+    case TILE_FLOOR:  return ' ';
+    case TILE_WALL:   return '#';
+    case TILE_DOOR:   return 'O';
+
+    case TILES_COUNT:
+    default: print_error_and_exit("Unreachable tile type %u in get_tile_char", tile.type);
+    }
 }
 
-static inline Cell make_cell_entity_random_at(size_t x, size_t y)
+char *tile_type_to_string(TileType type)
 {
-    Entity *e = malloc(sizeof(Entity));
-    memcpy(e->name, "Entity", 6); // TODO: random name based on rank
-    e->pos = (Cursor){x, y};
+    switch (type)
+    {
+    case TILE_FLOOR:  return "floor";
+    case TILE_WALL:   return "wall";
+    case TILE_DOOR:   return "door";
+
+    case TILES_COUNT:
+    default: print_error_and_exit("Unreachable tile type %u in tile_type_to_string", type);
+    }
+}
+
+static inline Entity make_entity_random_at(size_t x, size_t y)
+{
+    Entity e = {0};
+    memcpy(e.name, "Entity", 6); // TODO: random name based on rank
+    e.pos = (Cursor){x, y};
     // TODO:
        // > if an entity spawns on top of another entity it triggers some event:
        //   - on player: ambush
@@ -166,103 +267,64 @@ static inline Cell make_cell_entity_random_at(size_t x, size_t y)
        // > maybe it's better to have a fixed grid rather than a dynamic array, so that I can easily check if the slot is already occupied
        //   - I can then create rooms with walls and whatnot (screen is then a graphical representation of the grid)
        //   - If slot is, say, -1 then it's not possible to spawn an entity there, try again...
-    e->rank = rand() % ENTITY_RANKS_COUNT;
-    e->level = rand() % (10*(e->rank+1));
-    e->chance = rand() % (100*(e->rank+1));
-    e->attack = rand() % (100*(e->rank+1));
+    e.rank = rand() % ENTITY_RANKS_COUNT;
+    e.level = rand() % (10*(e.rank+1)) + 1; // TODO: think about the level, what does it give to the entity?
+                                            //       Does it boosts its stats in some way?
+                                            //       It can be the lower value for the spawned entities
+    e.hp = rand() % (100*(e.rank+1));
+    e.defense = rand() % (10*(e.rank+1));
+    e.chance = rand() % (100*(e.rank+1));
+    e.attack = rand() % (100*(e.rank+1));
+    e.agility = rand() % (10*(e.rank+1));
 
-    return make_cell_entity(e);
+    return e;
 }
 
-static inline Cell make_cell_entity_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
+static inline Entity make_entity_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
 {
     size_t x = (rand() % (x_high - x_low)) + x_low;
     size_t y = (rand() % (y_high - y_low)) + y_low;
-    return make_cell_entity_random_at(x, y);
+    return make_entity_random_at(x, y);
 }
 
-static inline Cell make_cell_wall(Wall *w)
+static inline Tile make_tile_wall(bool destructible)
 {
-    return (Cell){
-        .type = CELL_WALL,
-        .wall = w,
-        .pos = w->pos
+    return (Tile){
+        .type = TILE_WALL,
+        .destructible = destructible,
     };
 }
 
-static inline Cell make_cell_wall_random_at(size_t x, size_t y)
+static inline Tile make_tile_wall_random(void)
 {
-    Wall *w = malloc(sizeof(Wall));
-    w->pos = (Cursor){x, y};
-    w->destructible = rand()%2;
-    return make_cell_wall(w);
+    bool destructible = rand()%2;
+    return make_tile_wall(destructible);
 }
 
-static inline Cell make_cell_wall_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
+static inline Tile make_tile_door(bool openable, bool open, int leads_to)
 {
-    size_t x = (rand() % (x_high - x_low)) + x_low;
-    size_t y = (rand() % (y_high - y_low)) + y_low;
-    return make_cell_wall_random_at(x, y);
-}
-
-static inline Cell make_cell_door(Door *d)
-{
-    return (Cell){
-        .type = CELL_DOOR,
-        .door = d,
-        .pos = d->pos
+    return (Tile){
+        .type = TILE_DOOR,
+        .openable = openable,
+        .open = open,
+        .leads_to = leads_to
     };
 }
 
-static inline Cell make_cell_door_random_at(size_t x, size_t y)
+static inline Tile make_tile_door_random(void)
 {
-    Door *d = malloc(sizeof(Door));
-    d->pos = (Cursor){x, y};
-    d->openable = true;
-    d->open = rand()%2;
-    d->to = NULL; // TODO
-    return make_cell_door(d);
-}
-
-static inline Cell make_cell_door_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
-{
-    size_t x = (rand() % (x_high - x_low)) + x_low;
-    size_t y = (rand() % (y_high - y_low)) + y_low;
-    return make_cell_door_random_at(x, y);
+    bool openable = true;
+    bool open = rand()%2;
+    int leads_to = -1; // TODO
+    return make_tile_door(openable, open, leads_to);
 }
 
 typedef struct Room
 {
-    Cell *cells;
-    size_t width;
-    size_t height;
+    TileMap tilemap;
+    Entities entities;
+    EntitiesPtrs *entities_map;
 } Room;
-
-Room generate_room(size_t width, size_t height)
-{
-    Room room = {
-        .cells = malloc(sizeof(Cell)*width*height),
-        .width = width,
-        .height = height
-    };
-    int doors_count = (rand() % 2) + 1;
-    int entities_count = (rand() % 10) + 1;
-    for (size_t y = 0; y < height; y++) {
-        for (size_t x = 0; x < width; x++) {
-            size_t index = y*width + x;
-            if (x == 0 || y == 0 || x == width-1 || y == height-1) {
-                room.cells[index] = make_cell_wall_random_at(x, y);
-            } else if (doors_count > 0) {
-                room.cells[index] = make_cell_door_random_at(x, y);
-                doors_count--;
-            } else if (entities_count > 0) {
-                room.cells[index] = make_cell_entity_random_at(x, y);
-                entities_count--;
-            }
-        }
-    }
-    return room;
-}
 
 typedef struct
 {
@@ -273,8 +335,16 @@ typedef struct
 
 typedef struct
 {
-    Entity *self;
+    Item *items; 
+    size_t count;
+    size_t capacity;
+} Inventory;
+
+typedef struct
+{
+    Entity entity;
     size_t xp;
+    Inventory inventory;
 } Player;
 
 typedef struct
@@ -290,10 +360,126 @@ typedef struct
     Room *current_room;
     float save_timer;
     char message[256];
+
+    bool showing_general_info;
+    struct {
+        bool enabled;
+        size_t index;
+        EntitiesPtrs *entities;
+    } show_entities_info;
 } Game;
 static Game game = {0};
 
-static inline Cursor *get_player_pos(void) { return &game.data.player.self->pos; }
+static inline Cursor *get_player_pos(void) { return &game.data.player.entity.pos; }
+static inline bool entity_is_player(Entity *e) { return e == &game.data.player.entity; }
+static inline Tile *get_tile_under_player(void)
+{
+    Cursor *pos = get_player_pos();
+    return &tile_at(game.current_room, pos->x, pos->y);
+}
+
+static inline EntitiesPtrs *get_entities_under_player(void)
+{
+    Cursor *pos = get_player_pos();
+    return entities_at(game.current_room, pos->x, pos->y);
+}
+
+Tile *get_random_floor_tile(Room *room)
+{
+    int tries = 10;
+    size_t x;
+    size_t y;
+    while (tries > 0) {
+        x = rand() % (room->tilemap.width-1) + 1;
+        y = rand() % (room->tilemap.height-1) + 1;
+        Tile *tile = &tile_at(room, x, y);
+        if (tile->type == TILE_FLOOR) return tile;
+        else tries--;
+    }
+    for (size_t y = 1; y < room->tilemap.height-1; y++) {
+        for (size_t x = 1; x < room->tilemap.width-1; x++) {
+            Tile *tile = &tile_at(room, x, y);
+            if (tile->type == TILE_FLOOR) return tile;
+        }
+    }
+    return NULL;
+}
+
+bool get_random_empty_entity_slot_as_cursor(Room *room, Cursor *pos)
+{
+    int tries = 10;
+    size_t x;
+    size_t y;
+    while (tries > 0) {
+        x = rand() % (room->tilemap.width-1) + 1;
+        y = rand() % (room->tilemap.height-1) + 1;
+        Tile tile = tile_at(room, x, y);
+        if (tile.type != TILE_WALL) {
+            *pos = (Cursor){x, y};
+            return true;
+        } else tries--;
+    }
+    for (size_t y = 1; y < room->tilemap.height-1; y++) {
+        for (size_t x = 1; x < room->tilemap.width-1; x++) {
+            Tile tile = tile_at(room, x, y);
+            if (tile.type != TILE_WALL) {
+                *pos = (Cursor){x, y};
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void spawn_random_entity(Room *room)
+{
+    Cursor pos;
+    if (!get_random_empty_entity_slot_as_cursor(room, &pos)) return;
+    Entity e = make_entity_random_at(pos.x, pos.y);
+    da_push(&room->entities, e);
+    EntitiesPtrs *entities = &room->entities_map[index_in_room(*room, pos.x, pos.y)];
+    da_push(entities, &room->entities.items[room->entities.count-1]);
+}
+
+Room generate_room(size_t width, size_t height)
+{
+    Room room = {
+        .tilemap = (TileMap){
+            .tiles = malloc(sizeof(Tile)*width*height),
+            .width = width,
+            .height = height
+        },
+        .entities = (Entities){0},
+        .entities_map = malloc(sizeof(EntitiesPtrs)*width*height)
+    };
+
+    // TODO: si puo' migliorare questo loop
+    for (size_t y = 0; y < height; y++) {
+        for (size_t x = 0; x < width; x++) {
+            size_t index = y*width + x;
+            if (x == 0 || y == 0 || x == width-1 || y == height-1) {
+                room.tilemap.tiles[index] = (Tile){
+                    .type = TILE_WALL,
+                    .destructible = false
+                };
+            }
+        }
+    }
+
+    size_t doors_count = (rand() % 2) + 1;
+    for (size_t i = 0; i < doors_count; i++) {
+        Tile *tile = get_random_floor_tile(&room);
+        if (!tile) break;
+        *tile = make_tile_door_random();
+    }
+
+    size_t entities_count = (rand() % 10) + 1;
+    for (size_t i = 0; i < entities_count; i++) {
+        spawn_random_entity(&room);
+    }
+
+    return room;
+}
 
 const char *logpath = "./log.txt";
 void log_this(char *format, ...)
@@ -324,22 +510,6 @@ void write_message(const char *fmt, ...)
     log_this("MESSAGE: %s", game.message);
 }
 
-void spawn_random_entity(void)
-{
-    int tries = 10;
-    size_t x;
-    size_t y;
-    while (tries > 0) {
-        x = rand() % game.current_room->width;
-        y = rand() % game.current_room->height;
-        Cell cell = game.current_room->cells[y*game.current_room->width + x];
-        if (cell.type == CELL_BLANK || cell.type == CELL_ENTITY) {
-            make_cell_entity_random_at(x, y);
-            return;
-        } else tries--;
-    }
-}
-
 void save_entity(FILE *f, Entity *e)
 {
     // Name
@@ -364,7 +534,7 @@ bool save_game_data(void)
     if (!save_file) return false;
 
     // Player
-    save_entity(save_file, game.data.player.self);
+    save_entity(save_file, &game.data.player.entity);
     fwrite(&game.data.player.xp, sizeof(size_t), 1, save_file);
 
     // POD
@@ -406,12 +576,14 @@ bool load_game_data(void)
 {
     FILE *save_file = fopen(SAVE_FILEPATH, "rb");    
     if (!save_file) {
-        if (errno == ENOENT) return save_game_data();
-        else return false;
+        if (errno == ENOENT) {
+            // TODO: first initialization of all the things (player, rooms...) should happen here
+            return save_game_data();
+        } else return false;
     }
 
     // Player
-    if (!load_entity(save_file, game.data.player.self)) goto fail;
+    if (!load_entity(save_file, &game.data.player.entity)) goto fail;
     log_this("it was player's position");
     if (fread(&game.data.player.xp, sizeof(size_t), 1, save_file) != 1) goto fail;
 
@@ -483,6 +655,7 @@ typedef enum
     ALT_8,
     ALT_9, // NOTE: ALT_digit sequences must be consecutive
 
+    ALT_i,
     ALT_k,
     ALT_j,
     ALT_h,
@@ -510,9 +683,12 @@ typedef enum
     ALT_COLON,
 } Key;
 
+typedef void (* UpdateWindowFunction) (void);
+
 typedef struct
 {
     WINDOW *win;
+    UpdateWindowFunction update;
     size_t height;
     size_t width;
     size_t start_y;
@@ -520,6 +696,14 @@ typedef struct
 } Window;
 
 static Window win_main = {0};
+static Window win_bottom = {0};
+static Window win_right = {0};
+static Window *windows[] = {
+    &win_main,
+    &win_bottom,
+    &win_right,
+};
+const size_t windows_count = sizeof(windows)/sizeof(*windows);
 
 /* Pairs */
 typedef enum
@@ -533,10 +717,12 @@ static size_t screen_rows;
 static size_t screen_cols;
 static inline void get_screen_size(void) { getmaxyx(stdscr, screen_rows, screen_cols); }
 
-Window create_window(int h, int w, int y, int x, int color_pair)
+Window create_window(int h, int w, int y, int x, int color_pair, UpdateWindowFunction update)
 {
     Window win = {0};
     win.win = newwin(h, w, y, x);
+    assert(update);
+    win.update = update;
     win.height = h;
     win.width = w;
     win.start_y = y;
@@ -545,10 +731,108 @@ Window create_window(int h, int w, int y, int x, int color_pair)
     return win;
 }
 
+void update_window_main(void)
+{
+    for (size_t y = 0; y < game.current_room->tilemap.height; y++) {
+        for (size_t x = 0; x < game.current_room->tilemap.width; x++) {
+            Tile tile = game.current_room->tilemap.tiles[y*game.current_room->tilemap.width + x];
+            mvwaddch(win_main.win, y, x, get_tile_char(tile));
+        }
+    }
+
+    for(size_t i = 0; i < game.current_room->entities.count; i++) {
+        Entity e = game.current_room->entities.items[i];
+        mvwaddch(win_main.win, e.pos.y, e.pos.x, get_entity_char(e));
+    }
+
+    mvwaddch(win_main.win, get_player_pos()->y, get_player_pos()->x, '@');
+}
+
+void update_window_bottom(void)
+{
+    Tile *tile = get_tile_under_player();
+    EntitiesPtrs *entities = get_entities_under_player();
+
+    box(win_bottom.win, 0, 0);
+
+    size_t line = 1;
+    wmove(win_bottom.win, line++, 1);
+    switch (tile->type)
+    {
+    case TILE_FLOOR: wprintw(win_bottom.win, "Same old boring floor"); break;
+    case TILE_WALL:  wprintw(win_bottom.win, "A wall... wait, how'd I get up here?"); break;
+    case TILE_DOOR:
+        Tile *door = tile;
+        if (door->open) {
+            wprintw(win_bottom.win, "An open door that leads to ");
+            if (door->leads_to >= 0) wprintw(win_bottom.win, "room %d", door->leads_to);
+            else wprintw(win_bottom.win, "a new room");
+        } else {
+            wprintw(win_bottom.win, "A closed door. ");
+            if (door->openable) wprintw(win_bottom.win, "It seems that it can be opened, I wonder how, though.");
+            else wprintw(win_bottom.win, "It's so massive that I cannot open it.");
+        }
+        break;
+
+    case TILES_COUNT:
+    default: print_error_and_exit("Unreachable tile type %u in update_window_bottom", tile->type);
+    }
+
+    if (!da_is_empty(entities)) {
+        mvwprintw(win_bottom.win, line++, 1, "with the welcoming presence of:");
+        for (size_t i = 0; i < entities->count; i++) {
+            Entity *e = entities->items[i];
+            char entity_selected_char = game.show_entities_info.enabled
+                && i == game.show_entities_info.index ? '+' : '-';
+            mvwprintw(win_bottom.win, line++, 1, "%c %s, %s level %zu", entity_selected_char, e->name,
+                    entity_rank_to_string(e->rank), e->level);
+        }
+    }
+}
+
+void show_entity_info(Entity *e)
+{
+    size_t line = 1;
+    mvwprintw(win_right.win, line++, 1, "%s", e->name);
+    mvwprintw(win_right.win, line++, 1, "%s level %zu ", entity_rank_to_string(e->rank), e->level);
+    if (entity_is_player(e)) wprintw(win_right.win, "(%zu exp)", game.data.player.xp);
+    mvwprintw(win_right.win, line++, 1, "Health: %d", e->hp);
+    mvwprintw(win_right.win, line++, 1, "Defense: %d", e->defense);
+    mvwprintw(win_right.win, line++, 1, "Attack: %d (%d%%)", e->attack,
+            e->chance);
+    mvwprintw(win_right.win, line++, 1, "Agility: %d", e->agility);
+    mvwprintw(win_right.win, line++, 1, "Effects: ");
+    if (da_is_empty(&e->effects)) {
+        waddstr(win_right.win, "none");
+    } else {
+        da_foreach(e->effects, Effect, effect) {
+            mvwprintw(win_right.win, line++, 1, "- ");
+            waddstr(win_right.win, effect->name);
+        }
+    }
+}
+
+void update_window_left(void)
+{
+    box(win_right.win, 0, 0);
+
+    if (game.showing_general_info) {
+        size_t line = 1;
+        mvwprintw(win_right.win, line++, 1, "Total time: %.3f", game.data.total_time);
+        if (strlen(game.message)) mvwprintw(win_right.win, line++, 1, "Message: %s", game.message);
+    } else if (game.show_entities_info.enabled) {
+        show_entity_info(game.show_entities_info.entities->items[game.show_entities_info.index]);
+    } else {
+        show_entity_info(&game.data.player.entity);
+    }
+}
+
 void create_windows(void)
 {
     get_screen_size();
-    win_main = create_window(screen_rows, screen_cols, 0, 0, R_PAIR);
+    win_main   = create_window(3*screen_rows/4, 3*screen_cols/4, 0, 0, R_PAIR, update_window_main);
+    win_bottom = create_window(screen_rows/4, screen_cols, 3*screen_rows/4, 0, R_PAIR, update_window_bottom);
+    win_right   = create_window(3*screen_rows/4, screen_cols/4, 0, 3*screen_cols/4, R_PAIR, update_window_left);
 }
 
 void destroy_windows(void)
@@ -648,6 +932,7 @@ int read_key()
 
         case 'c'          : return ALT_c;
         case 'C'          : return ALT_C;
+        case 'i'          : return ALT_i;
         case 'k'          : return ALT_k;
         case 'K'          : return ALT_K;
         case 'j'          : return ALT_j;
@@ -673,29 +958,17 @@ int read_key()
     }
 }
 
-void update_window_main(void) {
-    box(win_main.win, 0, 0);
-
-    for (size_t i = 0; i < game.current_room->width*game.current_room->height; i++) {
-        Cell cell = game.current_room->cells[i];
-        mvwaddch(win_main.win, cell.pos.y+1, cell.pos.x+1, cell_char(cell));
-    }
-
-    mvwprintw(win_main.win, 0, 0, "Player '%s'", game.data.player.self->name);
-    if (strlen(game.message)) mvwprintw(win_main.win, win_main.height-2, 0, "Message: %s", game.message);
-    mvwprintw(win_main.win, win_main.height-1, 0, "Total time: %.3f", game.data.total_time);
+static inline void update_window(Window *window)
+{
+    werase(window->win);
+    window->update();
+    wnoutrefresh(window->win);
 }
 
-#define update_window(window_name)           \
-    do {                                     \
-        werase(win_##window_name.win);       \
-        update_window_##window_name();       \
-        wnoutrefresh(win_##window_name.win); \
-    } while (0)
-
-void update_windows(void)
+static inline void update_windows(void)
 {
-    update_window(main);
+    for (size_t i = 0; i < windows_count; i++)
+        update_window(windows[i]);
 }
 
 void update_cursor(void)
@@ -729,23 +1002,28 @@ void game_init()
     {
         game.data.player = (Player){0};
 
-        Entity *e = malloc(sizeof(Entity));
-        memcpy(e->name, "Adventurer", 10);
-        size_t player_x = 20;
-        size_t player_y = 20;
-        e->pos = (Cursor){player_x, player_y};
-        e->rank = RANK_1;
-        e->level = 1;
-        e->chance = 50;
-        e->attack = 10;
-        e->effects = (Effects){0}; 
-        game.data.player.self = e;
+        Entity e = {0};
+        memcpy(e.name, "Adventurer", 10);
+        e.rank = RANK_CIVILIAN;
+        e.level = 1;
+        e.hp = 100;
+        e.defense = 5;
+        e.chance = 75;
+        e.attack = 10;
+        e.agility = 75;
+        e.effects = (Effects){0}; 
+        game.data.player.entity = e;
 
-        Room initial_room = generate_room(win_main.width-2, win_main.height-2);
-        size_t player_index = player_y*initial_room.width + player_x;
-        initial_room.cells[player_index] = (Cell){ .type = CELL_PLAYER, .pos = e->pos }; // TODO: devo controllare che non ci fosse qualcos'altro e fare una free altrimenti leako un po' di memoria
+        Room initial_room = generate_room(win_main.width, win_main.height);
         da_push(&game.data.rooms, initial_room);
         game.current_room = &game.data.rooms.items[0];
+
+        Cursor pos;
+        if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
+            print_error_and_exit("E' un bel problema: TODO");
+        }
+        game.data.player.entity.pos = pos;
+
     }
 }
 
@@ -766,25 +1044,90 @@ void itoa(int n, char *buf)
     for (int i = 0; i < len; i++) buf[i] = tmp[len-i-1];
 }
 
-static inline void move_cursor_up(void)
+bool bound_check_entity_movement(Entity *e, int dx, int dy)
 {
-    Cursor *player_pos = get_player_pos();
-    if (player_pos->y > 1) player_pos->y--;
+    return (e->pos.x + dx > 0
+         && e->pos.x + dx < game.current_room->tilemap.width
+         && e->pos.y + dy > 0
+         && e->pos.y + dy < game.current_room->tilemap.height
+         && tile_at(game.current_room, e->pos.x + dx, e->pos.y + dy).type != TILE_WALL);
 }
-static inline void move_cursor_down(void)
+
+static inline void move_entity(Entity *e, int dx, int dy)
 {
-    Cursor *player_pos = get_player_pos();
-    if (player_pos->y < screen_rows-2) player_pos->y++;
+    if (bound_check_entity_movement(e, dx, dy)) {
+        e->pos.x += dx;
+        e->pos.y += dy;
+    }
 }
-static inline void move_cursor_left(void)
+
+static inline void move_player(int dx, int dy) { move_entity(&game.data.player.entity, dx, dy); }
+
+void interact(void)
 {
-    Cursor *player_pos = get_player_pos();
-    if (player_pos->x > 1) player_pos->x--;
-}
-static inline void move_cursor_right(void)
-{
-    Cursor *player_pos = get_player_pos();
-    if (player_pos->x < screen_cols-2) player_pos->x++;
+    Tile *tile = get_tile_under_player();
+    switch (tile->type)
+    {
+    case TILE_FLOOR:
+    case TILE_WALL:
+        break;
+
+    case TILE_DOOR:
+    {
+        Tile *door = tile;
+        if (door->open) {
+            if (door->leads_to >= 0) {
+                game.current_room = &game.data.rooms.items[door->leads_to];
+                Cursor pos;
+                if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
+                    print_error_and_exit("E' un bel problema: TODO");
+                }
+                game.data.player.entity.pos = pos;
+            } else {
+                Room room = generate_room(win_main.width, win_main.height);
+                da_push(&game.data.rooms, room);
+                game.current_room = &game.data.rooms.items[game.data.rooms.count-1];
+                int previous_room_index = door->leads_to;
+                door->leads_to = game.data.rooms.count-1;
+
+                Cursor pos;
+                if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
+                    print_error_and_exit("E' un bel problema: TODO");
+                }
+                game.data.player.entity.pos = pos;
+                Tile *arrival = &tile_at(game.current_room, pos.x, pos.y);
+                *arrival = make_tile_door(true, true, previous_room_index);
+            }
+        } else if (door->openable) {
+
+        } else {
+
+        }
+    } break;
+
+    case TILES_COUNT:
+    default:
+        print_error_and_exit("Unreachable tile type %u in interact", tile->type);
+    }
+
+    EntitiesPtrs *entities = get_entities_under_player();
+    // TODO: show options, but for now:
+    if (!da_is_empty(entities)) {
+        if (!game.show_entities_info.enabled) {
+            game.show_entities_info.enabled = true;
+            game.show_entities_info.index = 0;
+            game.show_entities_info.entities = entities;
+        } else {
+            if (game.show_entities_info.entities != entities) {
+                game.show_entities_info.entities = entities;
+                game.show_entities_info.index = 0;
+            } else if (game.show_entities_info.index < entities->count-1) {
+                game.show_entities_info.index++;
+            } else {
+                game.show_entities_info.index = 0;
+            }
+        }
+    }
 }
 
 bool can_quit(void) { return true; }
@@ -803,24 +1146,32 @@ void process_pressed_key(void)
     switch (key)
     {
         case 'w':
-        case KEY_UP: move_cursor_up(); break;
+        case KEY_UP: move_player(0, -1); break;
 
         case 's':
-        case KEY_DOWN: move_cursor_down(); break;
+        case KEY_DOWN: move_player(0, 1); break;
 
         case 'a':
-        case KEY_LEFT: move_cursor_left(); break;
+        case KEY_LEFT: move_player(-1, 0); break;
 
         case 'd':
-        case KEY_RIGHT: move_cursor_right(); break;
+        case KEY_RIGHT: move_player(1, 0); break;
 
         case CTRL('E'):
-            spawn_random_entity();
+            spawn_random_entity(game.current_room);
+            break;
+
+        case CTRL('I'):
+            game.showing_general_info = !game.showing_general_info;
             break;
 
         case CTRL_ALT_E:
             // TODO: I have to free all the entities
             write_message("TODO: clear all entities");
+            break;
+
+        case ENTER:
+            interact();
             break;
 
         case CTRL('S'):
@@ -829,6 +1180,13 @@ void process_pressed_key(void)
 
         case CTRL('Q'):
             if (can_quit()) quit();
+            break;
+
+        case ESC:
+            if (game.show_entities_info.enabled) {
+                game.show_entities_info.enabled = false;
+                game.show_entities_info.index = 0;
+            }
             break;
 
         //case ALT_0:
@@ -867,9 +1225,7 @@ void process_pressed_key(void)
         //case ALT_BACKSPACE:
         //case TAB:
         //case KEY_BTAB:
-        //case ENTER:
         //case KEY_BACKSPACE:
-        //case ESC:
 
         default:
             if (isprint(key)) log_this("Unprocessed key '%c'", key);
@@ -888,8 +1244,6 @@ int main(int argc, char **argv)
     initialize_colors();
     create_windows();
     game_init();
-
-    //memcpy(game.data.player.self->name, "Hamilnvt", 8);
 
     float current_time = get_time_in_seconds();
     float last_time = current_time;
