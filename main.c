@@ -45,7 +45,7 @@ static inline bool strneq(const char *s1, const char *s2, size_t n) { return str
 
 #define index(x, y, width) ((y)*(width) + (x))
 #define at(A, x, y, width) ((A)[index(x, y, width)])
-#define index_in_room(room, x, y) ((y)*(room).tilemap.width + (x))
+#define index_in_room(room, x, y) ((y)*(room)->tilemap.width + (x))
 #define tile_at(room, x, y) (at((room)->tilemap.tiles, (x), (y), (room)->tilemap.width))
 #define room_tiles_count(room) ((room)->tilemap.width*(room)->tilemap.height)
 #define entities_at(room, x, y) (&(at((room)->entities_map, (x), (y), (room)->tilemap.width)))
@@ -75,8 +75,8 @@ typedef enum
     RANK_WARRIOR,
     RANK_NOBLE,
     RANK_KING,
-    RANK_DEMON,
-    RANK_GOD,
+    RANK_EMPEROR,
+    RANK_WORLDLORD,
     ENTITY_RANKS_COUNT
 } EntityRank;
 
@@ -84,12 +84,12 @@ char *entity_rank_to_string(EntityRank rank)
 {
     switch (rank)
     {
-    case RANK_CIVILIAN: return "Civilian";
-    case RANK_WARRIOR:  return "Warrior";
-    case RANK_NOBLE:    return "Noble";
-    case RANK_KING:     return "King";
-    case RANK_DEMON:    return "Demon";
-    case RANK_GOD:      return "God";
+    case RANK_CIVILIAN:  return "Civilian";
+    case RANK_WARRIOR:   return "Warrior";
+    case RANK_NOBLE:     return "Noble";
+    case RANK_KING:      return "King";
+    case RANK_EMPEROR:   return "Emperor";
+    case RANK_WORLDLORD: return "World Lord";
 
     case ENTITY_RANKS_COUNT:
     default: print_error_and_exit("Unreachable entity rank %u in entity_rank_to_string", rank);
@@ -190,6 +190,8 @@ typedef struct Entity
 {
     char name[ENTITY_NAME_MAX_LEN + 1];
     Cursor pos;
+    Cursor direction;
+
     EntityRank rank;
     size_t level;
 
@@ -221,12 +223,12 @@ char get_entity_char(Entity e)
 {
     switch (e.rank)
     {
-    case RANK_CIVILIAN: return 'c';
-    case RANK_WARRIOR:  return 'w';
-    case RANK_NOBLE:    return 'N';
-    case RANK_KING:     return 'K';
-    case RANK_DEMON:    return 'D';
-    case RANK_GOD:      return 'G';
+    case RANK_CIVILIAN:  return 'c';
+    case RANK_WARRIOR:   return 'w';
+    case RANK_NOBLE:     return 'N';
+    case RANK_KING:      return 'K';
+    case RANK_EMPEROR:   return 'E';
+    case RANK_WORLDLORD: return 'W';
 
     case ENTITY_RANKS_COUNT:
     default: print_error_and_exit("Unreachable entity rank %u in get_entity_char", e.rank);
@@ -442,7 +444,7 @@ void spawn_random_entity(Room *room)
     if (!get_random_empty_entity_slot_as_cursor(room, &pos)) return;
     Entity e = make_entity_random_at(pos.x, pos.y);
     da_push(&room->entities, e);
-    EntitiesIndices *entities = &room->entities_map[index_in_room(*room, pos.x, pos.y)];
+    EntitiesIndices *entities = &room->entities_map[index_in_room(room, pos.x, pos.y)];
     da_push(entities, room->entities.count-1);
 }
 
@@ -718,11 +720,11 @@ typedef enum
 } ColorPair;
 
 /* Windows */
-static size_t screen_rows;
-static size_t screen_cols;
-static inline void get_screen_size(void) { getmaxyx(stdscr, screen_rows, screen_cols); }
+static size_t terminal_height;
+static size_t terminal_width;
+static inline void get_terminal_size(void) { getmaxyx(stdscr, terminal_height, terminal_width); }
 
-Window create_window(int h, int w, int y, int x, int color_pair, UpdateWindowFunction update)
+Window create_window(int x, int y, int w, int h, int color_pair, UpdateWindowFunction update)
 {
     Window win = {0};
     win.win = newwin(h, w, y, x);
@@ -834,10 +836,16 @@ void update_window_left(void)
 
 void create_windows(void)
 {
-    get_screen_size();
-    win_main   = create_window(3*screen_rows/4, 3*screen_cols/4, 0, 0, R_PAIR, update_window_main);
-    win_bottom = create_window(screen_rows/4, screen_cols, 3*screen_rows/4, 0, R_PAIR, update_window_bottom);
-    win_right   = create_window(3*screen_rows/4, screen_cols/4, 0, 3*screen_cols/4, R_PAIR, update_window_left);
+    get_terminal_size();
+    win_main   = create_window(0, 0,
+                               3*terminal_width/4, 3*terminal_height/4,
+                               R_PAIR, update_window_main);
+    win_bottom = create_window(0, 3*terminal_height/4, 
+                               terminal_width, terminal_height/4+1,
+                               R_PAIR, update_window_bottom);
+    win_right  = create_window(3*terminal_width/4, 0,
+                               terminal_width/4+1, 3*terminal_height/4,
+                               R_PAIR, update_window_left);
 }
 
 void destroy_windows(void)
@@ -990,7 +998,7 @@ void update_cursor(void)
 void handle_sigwinch(int signo)
 {
     (void)signo;
-    get_screen_size();
+    get_terminal_size();
     destroy_windows();
     create_windows();
     
@@ -1033,24 +1041,7 @@ void game_init()
     }
 }
 
-void itoa(int n, char *buf)
-{
-    if (n == 0) {
-        buf[0] = '0';
-        return;
-    }
-    char tmp[64] = {0};
-    int i = 0;
-    while (n > 0) {
-        tmp[i] = n % 10 + '0';
-        i++;
-        n /= 10;
-    }
-    int len = strlen(tmp);
-    for (int i = 0; i < len; i++) buf[i] = tmp[len-i-1];
-}
-
-bool bound_check_entity_movement(Entity *e, int dx, int dy)
+bool entity_can_move(Entity *e, int dx, int dy)
 {
     return (e->pos.x + dx > 0
          && e->pos.x + dx < game.current_room->tilemap.width
@@ -1061,66 +1052,78 @@ bool bound_check_entity_movement(Entity *e, int dx, int dy)
 
 static inline void move_entity(Entity *e, int dx, int dy)
 {
-    if (bound_check_entity_movement(e, dx, dy)) {
+    if (entity_can_move(e, dx, dy)) {
         e->pos.x += dx;
         e->pos.y += dy;
+        e->direction = (Cursor){dx, dy};
     }
 }
 
-// TODO: change logic here, if player moves onto a door, they interact with it, but stand still
-static inline void move_player(int dx, int dy) { move_entity(&game.data.player.entity, dx, dy); }
-
-void interact(void)
+void player_interact_with_door(Tile *door)
 {
-    Tile *tile = get_tile_under_player();
-    switch (tile->type)
-    {
-    case TILE_FLOOR:
-    case TILE_WALL:
-        break;
-
-    case TILE_DOOR:
-    {
-        Tile *door = tile;
-        if (door->open) {
-            if (door->leads_to >= 0) {
-                game.current_room = &game.data.rooms.items[door->leads_to];
-                Cursor pos;
-                if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
-                    print_error_and_exit("E' un bel problema: TODO");
-                }
-                game.data.player.entity.pos = pos;
-            } else {
-                Room room = generate_room(win_main.width, win_main.height);
-                room.index = game.data.rooms.count;
-                da_push(&game.data.rooms, room);
-                int previous_room_index = game.current_room->index;
-                game.current_room = &game.data.rooms.items[game.data.rooms.count-1];
-                door->leads_to = game.data.rooms.count-1;
-                // TODO: player position when coming back should be the one of the door from which they exited through;
-                // (sono stanco, non so cosa ho scritto, buona notte)
-
-                Cursor pos;
-                if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
-                    print_error_and_exit("E' un bel problema: TODO");
-                }
-                game.data.player.entity.pos = pos;
-                Tile *arrival = &tile_at(game.current_room, pos.x, pos.y);
-                *arrival = make_tile_door(true, true, previous_room_index);
+    if (door->open) {
+        if (door->leads_to >= 0) {
+            game.current_room = &game.data.rooms.items[door->leads_to];
+            Cursor pos;
+            if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
+                print_error_and_exit("E' un bel problema: TODO");
             }
-        } else if (door->openable) {
-
+            game.data.player.entity.pos = pos;
         } else {
+            Room room = generate_room(win_main.width, win_main.height);
+            room.index = game.data.rooms.count;
+            da_push(&game.data.rooms, room);
+            int previous_room_index = game.current_room->index;
+            game.current_room = &game.data.rooms.items[game.data.rooms.count-1];
+            door->leads_to = game.data.rooms.count-1;
+            // TODO: player position when coming back should be the one of the door from which they exited through;
+            // (sono stanco, non so cosa ho scritto, buona notte)
 
+            Cursor pos;
+            if (!get_random_empty_entity_slot_as_cursor(game.current_room, &pos)) {
+                print_error_and_exit("E' un bel problema: TODO");
+            }
+            game.data.player.entity.pos = pos;
+            Tile *arrival = &tile_at(game.current_room, pos.x, pos.y);
+            *arrival = make_tile_door(true, true, previous_room_index);
         }
-    } break;
+    } else if (door->openable) {
 
-    case TILES_COUNT:
-    default:
-        print_error_and_exit("Unreachable tile type %u in interact", tile->type);
+    } else {
+
     }
+}
+
+void player_interact_with_entities(EntitiesIndices *entities)
+{
+    (void)entities;
+}
+
+static_assert(TILES_COUNT == 3, "Move player onto all tiles");
+static inline void move_player(int dx, int dy)
+{
+    if (!entity_can_move(&game.data.player.entity, dx, dy)) return;
+    Cursor *player_pos = get_player_pos();
+    Cursor new_pos = {player_pos->x + dx, player_pos->y + dy};
+    Tile *tile = &tile_at(game.current_room, new_pos.x, new_pos.y);
+    if (tile->type == TILE_WALL) return;
 
     EntitiesIndices *entities = get_entities_under_player();
+    if (da_is_empty(entities)) {
+        if (tile->type == TILE_DOOR) player_interact_with_door(tile);
+        else if (tile->type == TILE_FLOOR) {
+            game.data.player.entity.pos = new_pos;
+            game.data.player.entity.direction = (Cursor){dx, dy};
+        }
+    } else player_interact_with_entities(entities);
+}
+
+// TODO: non funziona :)
+void check_player_look_direction(void)
+{
+    Cursor pos       = game.data.player.entity.pos;
+    Cursor direction = game.data.player.entity.direction;
+    EntitiesIndices *entities = entities_at(game.current_room, pos.x + direction.x, pos.y + direction.y);
     // TODO: show options, but for now:
     if (!da_is_empty(entities)) {
         if (!game.show_entities_info.enabled) {
@@ -1154,7 +1157,9 @@ void process_pressed_key(void)
     switch (key)
     {
         case 'w':
-        case KEY_UP: move_player(0, -1); break;
+        case KEY_UP:
+            move_player(0, -1);
+            break;
 
         case 's':
         case KEY_DOWN: move_player(0, 1); break;
@@ -1178,8 +1183,10 @@ void process_pressed_key(void)
             write_message("TODO: clear all entities");
             break;
 
-        case ENTER:
-            interact();
+        case KEY_BACKSPACE:
+            EntitiesIndices *entities = get_entities_under_player();
+            if (!da_is_empty(entities))
+                da_remove(&game.current_room->entities, entities->items[0]);
             break;
 
         case CTRL('S'):
@@ -1233,11 +1240,21 @@ void process_pressed_key(void)
         //case ALT_BACKSPACE:
         //case TAB:
         //case KEY_BTAB:
-        //case KEY_BACKSPACE:
 
         default:
             if (isprint(key)) log_this("Unprocessed key '%c'", key);
             else log_this("Unprocessed key %d", key);
+    }
+}
+
+void clear_and_populate_entities_map(void)
+{
+    for (size_t i = 0; i < room_tiles_count(game.current_room); i++) {
+        da_clear(&game.current_room->entities_map[i]);
+    }
+    da_enumerate (game.current_room->entities, Entity, i, e) {
+        size_t index = index_in_room(game.current_room, e->pos.x, e->pos.y);
+        da_push(&game.current_room->entities_map[index], i);
     }
 }
 
@@ -1269,6 +1286,8 @@ int main(int argc, char **argv)
         doupdate();
 
         //advance_save_timer(dt); // TODO rimetti
+
+        clear_and_populate_entities_map();
 
         napms(16); // TODO: do it with the calculated dt
     }
