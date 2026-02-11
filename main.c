@@ -23,7 +23,7 @@
  * - since now entities can stack, there's no need to check if two of them "collide" they are just put in the same tile
  * - monsters drop key to open doors
  *   > heavy doors can be opened by defeating a King in the room and lead to special rooms (?)
- * - invetory to store/equip items
+ * - inventory to store/equip items
  * - each step increments a "timer" and after some time some actions are performed (a monster moves, a new monster spawns, something good/bad happens)
  * - clear entities_map at the end of the iteration and repopulate it at the beginning?
  * - monsters in a new room spawn accordingly to player's level
@@ -33,6 +33,12 @@
  *   > what does it give to the entity? Does it boosts its stats in some way?
  *   > It can be the lower value for the spawned entities
  *   > but for the player?
+ * - Info struct with all the nerdy stuff:
+ *   > total time
+ *   > seed
+ *   > monsters killed
+ *   > deaths
+ *   ...
 */
 
 #include <string.h>
@@ -193,14 +199,45 @@ typedef struct
     Tile *tiles;
 } TileMap;
 
-typedef struct Room Room;
-typedef void (* EffectAction) (Room *room);
+typedef enum
+{
+    EFFECT_ATTACK,
+    EFFECT_HEAL,
+    EFFECT_POISON,
+    EFFECT_FIRE,
+    __effect_types_count
+} EffectType;
 
+#define EFFECT_PERSISTENT -1
 typedef struct
 {
-    char name[32];
-    EffectAction action;
+    EffectType type;
+    size_t value;
+    int duration;
 } Effect;
+
+static_assert(__effect_types_count == 4, "Make all effects in make_effect");
+Effect make_effect(EffectType type, ...)
+{
+    va_list args;
+    va_start(args, type);
+    Effect effect = { .type = type };
+    switch (type)
+    {
+    // TODO
+    case EFFECT_ATTACK: break;
+    case EFFECT_HEAL:   break;
+    case EFFECT_POISON: break;
+    case EFFECT_FIRE:   break;
+
+    case __effect_types_count:
+    default:
+        print_error_and_exit("Unreachable effect type %u in make_effect", type);
+    }
+
+    va_end(args);
+    return effect;
+}
 
 typedef struct
 {
@@ -208,6 +245,15 @@ typedef struct
     size_t count;
     size_t capacity;
 } Effects;
+
+typedef struct
+{
+    int attack;
+    int chance;
+    int hp;
+    int defense;
+    int agility;
+} Stats;
 
 typedef enum
 {
@@ -232,12 +278,8 @@ typedef struct
     ItemType type;
     char name[ITEM_NAME_MAX_LEN + 1];
     int durability;
+    Stats stats;
 
-    int attack;
-    int chance;
-    int hp;
-    int defense;
-    int agility;
     Effects effects;
 } Item;
 
@@ -300,20 +342,14 @@ typedef struct Entity
     V2i pos;
     Direction direction;
     bool dead;
-
     EntityRank rank;
     size_t level;
+    float movement_timer;
+
+    Stats stats;
 
     Equipment equipment;
-
-    int hp;
-    int defense;
-    int chance;
-    int attack;
-    int agility;
     Effects effects; 
-
-    float movement_timer;
 } Entity;
 
 typedef struct
@@ -378,6 +414,8 @@ typedef struct Room
     TileMap tilemap;
     Entities entities;
     EntitiesIndices *entities_map;
+    //Items items; // TODO
+    //ItemsIndices *items_map;
 } Room;
 
 typedef struct
@@ -405,7 +443,6 @@ typedef struct
 {
     Player player;
 
-    // POD
     size_t current_room_index;
     float total_time;
     uint64_t rng_seed;
@@ -413,7 +450,6 @@ typedef struct
     RNG entities_rng;
     RNG items_rng;
 
-    // Dynamic
     Rooms rooms;
 } Data;
 
@@ -466,6 +502,8 @@ void rng_log(RNG rng)
     log_this("-----------------------------\n");
 }
 
+static inline void add_effect_to_entity(Effect effect, Entity *entity) { da_push(&entity->effects, effect); }
+
 static inline Entity make_entity_random_at(size_t x, size_t y)
 {
     Entity e = {
@@ -473,14 +511,17 @@ static inline Entity make_entity_random_at(size_t x, size_t y)
         .direction = entities_rng_generate() % __directions_count,
         .rank      = entities_rng_generate() % __entity_ranks_count,
         .level     = entities_rng_generate() % (10*(e.rank+1)) + 1,
-        .hp        = entities_rng_generate() % (100*(e.rank+1)),
-        .defense   = entities_rng_generate() % (10*(e.rank+1)),
-        .chance    = entities_rng_generate() % (100*(e.rank+1)),
-        .attack    = entities_rng_generate() % (100*(e.rank+1)),
-        .agility   = entities_rng_generate() % (10*(e.rank+1)),
-
+        .stats = (Stats){
+            .hp      = entities_rng_generate() % (100*(e.rank+1)),
+            .defense = entities_rng_generate() % (10*(e.rank+1)),
+            .chance  = entities_rng_generate() % (100*(e.rank+1)),
+            .attack  = entities_rng_generate() % (100*(e.rank+1)),
+            .agility = entities_rng_generate() % (10*(e.rank+1))
+        },
         .movement_timer = entities_rng_generate() % 10 + 2
     };
+
+    add_effect_to_entity(make_effect(EFFECT_ATTACK), &e);
 
     memcpy(e.name, "Entity", 6); // TODO: random name
 
@@ -549,12 +590,13 @@ void shuffle_entities_array(size_t *entities_indices, size_t entities_count)
     }
 }
 
-typedef bool (*TilePredicate)(Tile*, void *_args);
+typedef bool (* TilePredicate)(Tile *tile, void *_args);
 
 Tile *get_random_tile_predicate(Room *room, TilePredicate predicate, void *args)
 {
     size_t tiles_count = room_tiles_count(room);
     size_t *tiles_indices = malloc(sizeof(size_t)*tiles_count);
+    if (!tiles_indices) return NULL;
     for (size_t i = 0; i < tiles_count; i++) tiles_indices[i] = i;
     shuffle_tiles_array(tiles_indices, tiles_count);
 
@@ -656,6 +698,7 @@ void spawn_random_entity(Room *room)
 Tile *create_tiles(size_t width, size_t height)
 {
     Tile *tiles = malloc(sizeof(Tile)*width*height);
+    if (!tiles) return NULL; // TODO handle it when function is used
     for (size_t y = 0; y < height; y++) {
         for (size_t x = 0; x < width; x++) {
             size_t index = index(x, y, width);
@@ -675,7 +718,7 @@ Room *generate_room(size_t width, size_t height) // TODO: add a from Room to ens
             .tiles = create_tiles(width, height)
         },
         .entities = (Entities){0},
-        .entities_map = malloc(sizeof(EntitiesIndices)*width*height)
+        .entities_map = malloc(sizeof(EntitiesIndices)*width*height) // TODO: handle malloc fail
     };
 
     // TODO: si puo' migliorare questo loop
@@ -715,6 +758,64 @@ void write_message(const char *fmt, ...)
     vsnprintf(game.message, sizeof(game.message), fmt, ap);
     va_end(ap);
     log_this("MESSAGE: %s", game.message);
+}
+
+
+#define EFFECTACTION_PARAMETERS Effect *effect, Entity *user, Entity *target
+typedef void (* EffectAction)(EFFECTACTION_PARAMETERS);
+typedef struct
+{
+    const char *name;
+    EffectAction action;
+} EffectDefinition;
+
+#define UNUSED_EFFECTACTION_PARAMETERS \
+    (void)effect;                      \
+    (void)user;                        \
+    (void)target;                      \
+
+void effect_attack(EFFECTACTION_PARAMETERS)
+{
+    (void)effect;
+    (void)user;
+
+    write_message("Attack!");
+    target->stats.hp -= user->stats.attack;
+}
+
+void effect_heal(EFFECTACTION_PARAMETERS)
+{
+    UNUSED_EFFECTACTION_PARAMETERS;
+
+    write_message("Heal!");
+}
+
+void effect_poison(EFFECTACTION_PARAMETERS)
+{
+    UNUSED_EFFECTACTION_PARAMETERS;
+
+    write_message("Poison!");
+}
+
+void effect_fire(EFFECTACTION_PARAMETERS)
+{
+    UNUSED_EFFECTACTION_PARAMETERS;
+
+    write_message("Fire!");
+}
+
+static_assert(__effect_types_count == 4, "Add all effects to effects_definitions");
+static const EffectDefinition effects_definitions[] = {
+    [EFFECT_ATTACK] = { "Attack", effect_attack },
+    [EFFECT_HEAL]   = {0},
+    [EFFECT_POISON] = {0},
+    [EFFECT_FIRE]   = {0}
+};
+
+const EffectDefinition *get_effect(EffectType type)
+{
+    if (type >= 0 && type < __effect_types_count) return &effects_definitions[type];
+    else print_error_and_exit("Unreachable effect type %u in get_effect", type);
 }
 
 static inline void advance_switch_timer(float dt) { game.switch_timer += dt; }
@@ -908,18 +1009,17 @@ void show_entity_info(Entity *e)
     mvwprintw(win_right.win, line++, 1, "%s", e->name);
     mvwprintw(win_right.win, line++, 1, "%s level %zu ", entity_rank_to_string(e->rank), e->level);
     if (entity_is_player(e)) wprintw(win_right.win, "(%zu exp)", game.data.player.xp);
-    mvwprintw(win_right.win, line++, 1, "Health: %d", e->hp);
-    mvwprintw(win_right.win, line++, 1, "Defense: %d", e->defense);
-    mvwprintw(win_right.win, line++, 1, "Attack: %d (%d%%)", e->attack,
-            e->chance);
-    mvwprintw(win_right.win, line++, 1, "Agility: %d", e->agility);
+    mvwprintw(win_right.win, line++, 1, "Health: %d", e->stats.hp);
+    mvwprintw(win_right.win, line++, 1, "Defense: %d", e->stats.defense);
+    mvwprintw(win_right.win, line++, 1, "Attack: %d (%d%%)", e->stats.attack, e->stats.chance);
+    mvwprintw(win_right.win, line++, 1, "Agility: %d", e->stats.agility);
     mvwprintw(win_right.win, line++, 1, "Effects: ");
     if (da_is_empty(&e->effects)) {
         waddstr(win_right.win, "none");
     } else {
         da_foreach(e->effects, Effect, effect) {
-            mvwprintw(win_right.win, line++, 1, "- ");
-            waddstr(win_right.win, effect->name);
+            EffectDefinition *effect_definition = get_effect(effect->type);
+            mvwprintw(win_right.win, line++, 1, "- %s", effect_definition->name);
         }
     }
 }
@@ -1019,33 +1119,158 @@ void initialize_colors(void)
     }
 }
 
+#define save_da(da, save_da_item_fn, file)            \
+    do {                                              \
+        fwrite(&(da).count, sizeof(size_t), 1, file); \
+        for (size_t i = 0; i < (da).count; i++) {     \
+            save_da_item_fn(file, (da.items)+i);      \
+        }                                             \
+    } while (0)
+
+#define load_da(da_ptr, load_da_item_fn, file)                            \
+    do {                                                                  \
+        da_clear(da_ptr);                                                 \
+        size_t count = 0;                                                 \
+        if (fread(&count, sizeof(size_t), 1, file) != 1) goto fail;       \
+        if (count > 0) {                                                  \
+            (da_ptr)->count = count;                                      \
+            (da_ptr)->capacity = count;                                   \
+            (da_ptr)->items = malloc(count * sizeof((da_ptr)->items[0])); \
+            if (!(da_ptr)->items) goto fail;                              \
+            da_foreach (*(da_ptr), __typeof__((da_ptr)->items[0]), _item) \
+                if (!load_da_item_fn(file, _item)) goto fail;             \
+        }                                                                 \
+    } while (0)
+
+void save_effect(FILE *f, Effect *effect)
+{
+    fwrite(effect, sizeof(Effect), 1, f);
+}
+bool load_effect(FILE *f, Effect *effect)
+{
+    if (fread(effect, sizeof(Effect), 1, f) != 1) return false;
+    return true;
+}
+
+void save_item(FILE *f, Item *item)
+{
+    fwrite(&item->type, sizeof(ItemType), 1, f);
+    fwrite(item->name, sizeof(item->name), 1, f);
+    fwrite(&item->durability, sizeof(int), 1, f);
+    fwrite(&item->stats, sizeof(Stats), 1, f);
+    save_da(item->effects, save_effect, f); 
+}
+bool load_item(FILE *f, Item *item)
+{
+    if (fread(&item->type, sizeof(ItemType), 1, f) != 1) goto fail;
+    if (fread(item->name, sizeof(item->name), 1, f) != 1) goto fail;
+    if (fread(&item->durability, sizeof(int), 1, f) != 1) goto fail;
+    if (fread(&item->stats, sizeof(Stats), 1, f) != 1) goto fail;
+    load_da(&item->effects, load_effect, f); 
+    return true;
+fail:
+    return false;
+}
+
+void save_item_slot(FILE *f, ItemSlot *slot)
+{
+    fwrite(&slot->type, sizeof(ItemType), 1, f);
+    save_item(f, &slot->item);
+}
+bool load_item_slot(FILE *f, ItemSlot *slot)
+{
+    if (fread(&slot->type, sizeof(ItemType), 1, f) != 1) return false;
+    if (!load_item(f, &slot->item)) return false;
+    return true;
+}
+
 void save_entity(FILE *f, Entity *e)
 {
-    // Name
-    fwrite(e->name, sizeof(char), sizeof(e->name), f);
-    
     // POD
-    fwrite(&e->pos,    sizeof(V2i),     1, f);
-    fwrite(&e->rank,   sizeof(EntityRank), 1, f);
-    fwrite(&e->level,  sizeof(size_t),     1, f);
-    fwrite(&e->chance, sizeof(int),        1, f);
-    fwrite(&e->attack, sizeof(int),        1, f);
+    fwrite(e->name, sizeof(e->name), 1, f);
+    fwrite(&e->pos,   sizeof(V2i),     1, f);
+    fwrite(&e->direction,   sizeof(Direction),     1, f);
+    fwrite(&e->dead,   sizeof(bool),     1, f);
+    fwrite(&e->rank,  sizeof(EntityRank), 1, f);
+    fwrite(&e->level, sizeof(size_t),     1, f);
+    fwrite(&e->movement_timer, sizeof(float),     1, f);
+
+    fwrite(&e->stats, sizeof(Stats), 1, f);
     
-    // Effects TODO
-    // 3. IMPORTANT: Do NOT write the 'effects' struct directly.
-    // It contains pointers. For now, we skip it.
+    save_da(e->equipment, save_item_slot, f);
+    save_da(e->effects, save_effect, f);
+}
+bool load_entity(FILE  *f, Entity *e)
+{
+    // POD
+    if (fread(e->name,    sizeof(e->name),    1, f) != 1) goto fail;
+    if (fread(&e->pos,    sizeof(V2i),        1, f) != 1) goto fail;
+    if (fread(&e->direction,    sizeof(Direction), 1, f) != 1) goto fail;
+    if (fread(&e->dead,    sizeof(bool), 1, f) != 1) goto fail;
+    if (fread(&e->rank,   sizeof(EntityRank), 1, f) != 1) goto fail;
+    if (fread(&e->level,  sizeof(size_t),     1, f) != 1) goto fail;
+    if (fread(&e->movement_timer,  sizeof(float),     1, f) != 1) goto fail;
+    if (fread(&e->stats, sizeof(Stats),       1, f) != 1) goto fail;
+    load_da(&e->equipment, load_item_slot, f);
+    load_da(&e->effects, load_effect, f);
+
+    return true;
+fail:
+    return false;
+}
+
+
+void save_tile(FILE *f, Tile *tile) { fwrite(tile, sizeof(Tile), 1, f); }
+
+void save_room(FILE *f, Room *room)
+{
+    fwrite(&room->index, sizeof(size_t), 1, f);
+
+    fwrite(&room->tilemap.width, sizeof(size_t), 1, f);
+    fwrite(&room->tilemap.height, sizeof(size_t), 1, f);
+    for (size_t i = 0; i < room_tiles_count(room); i++)
+        save_tile(f, &room->tilemap.tiles[i]);
+
+    save_da(room->entities, save_entity, f);
+
+    // NOTE: no need to save entities_map
+}
+bool load_room(FILE *f, Room *room)
+{
+    if (fread(&room->index, sizeof(size_t), 1, f) != 1) goto fail;
+
+    if (fread(&room->tilemap.width, sizeof(size_t), 1, f) != 1) goto fail;
+    if (fread(&room->tilemap.height, sizeof(size_t), 1, f) != 1) goto fail;
+    size_t count = room_tiles_count(room);
+    // TODO: I can even avoid to save/load tiles positions, i can recalculate it here
+    room->tilemap.tiles = malloc(sizeof(Tile)*count);
+    if (!room->tilemap.tiles) goto fail;
+    if (fread(room->tilemap.tiles, sizeof(Tile), count, f) != count) goto fail;
+
+    load_da(&room->entities, load_entity, f);
+
+    room->entities_map = malloc(sizeof(EntitiesIndices)*count);
+    if (!room->entities_map) goto fail;
+    memset(room->entities_map, 0, sizeof(EntitiesIndices)*count);
+
+    return true;
+fail:
+    return false;
 }
 
 #define SAVE_FILEPATH "./save.bin"
-bool save_game_data(void)
+void save_game_data(void)
 {
     FILE *save_file = fopen(SAVE_FILEPATH, "wb");    
-    if (!save_file) return false;
+    if (!save_file) {
+        print_error_and_exit("Could not save game data to %s", SAVE_FILEPATH);
+        return;
+    }
 
     // Player
     save_entity(save_file, &game.data.player.entity);
     fwrite(&game.data.player.xp, sizeof(size_t), 1, save_file);
-    //Inventory inventory;
+    save_da(game.data.player.inventory, save_item, save_file); 
 
     // POD
     fwrite(&game.data.current_room_index, sizeof(size_t),   1, save_file);
@@ -1055,38 +1280,41 @@ bool save_game_data(void)
     fwrite(&game.data.entities_rng,       sizeof(RNG),      1, save_file);
     fwrite(&game.data.items_rng,          sizeof(RNG),      1, save_file);
 
-    // Rooms TODO
-    //fwrite(&game.data.entities.count, sizeof(size_t), 1, save_file);
-    //da_foreach (game.data.entities, Entity*, e)
-    //    save_entity(save_file, *e);
+    // Rooms
+    save_da(game.data.rooms, save_room, save_file);
 
     fclose(save_file);
     write_message("saved");
-    return true;
 }
 
 void init_game_data(void)
 {
+    // RNGs
     uint64_t seed = time(NULL);
     game.data.rng_seed = seed;
     rng_initialize(&game.data.rooms_rng,    seed++);
     rng_initialize(&game.data.entities_rng, seed++);
     rng_initialize(&game.data.items_rng,    seed++);
 
-    game.data.player = (Player){0};
+    // Player
+    Entity player_entity = {0};
+    memcpy(player_entity.name, "Adventurer", 10);
+    player_entity.rank = RANK_CIVILIAN;
+    player_entity.level = 1;
 
-    Entity e = {0};
-    memcpy(e.name, "Adventurer", 10);
-    e.rank = RANK_CIVILIAN;
-    e.level = 1;
-    e.hp = 100;
-    e.defense = 5;
-    e.chance = 75;
-    e.attack = 10;
-    e.agility = 75;
-    e.effects = (Effects){0}; 
-    game.data.player.entity = e;
+    player_entity.stats = (Stats) {
+        .hp      = 100,
+        .defense = 5,
+        .chance  = 75,
+        .attack  = 10,
+        .agility = 75
+    };
 
+    add_effect_to_entity(make_effect(EFFECT_ATTACK), &player_entity);
+
+    game.data.player.entity = player_entity;
+
+    // Initial Room
     Room *initial_room = generate_room(win_main.width, win_main.height);
     game.data.current_room_index = initial_room->index;
 
@@ -1094,28 +1322,6 @@ void init_game_data(void)
     if (!get_random_entity_slot_as_vector(CURRENT_ROOM, &pos))
         print_error_and_exit("It should never happen");
     game.data.player.entity.pos = pos;
-}
-
-bool load_entity(FILE  *f, Entity *e)
-{
-    // Name
-    if (fread(e->name, sizeof(char), sizeof(e->name), f) != sizeof(e->name)) return false;
-
-    // POD
-    if (fread(&e->pos,    sizeof(V2i),     1, f) != 1) return false;
-    log_this("Loaded entity position (%zu, %zu)", e->pos.x, e->pos.y);
-    if (fread(&e->rank,   sizeof(EntityRank), 1, f) != 1) return false;
-    if (fread(&e->level,  sizeof(size_t),     1, f) != 1) return false;
-    if (fread(&e->chance, sizeof(int),        1, f) != 1) return false;
-    if (fread(&e->attack, sizeof(int),        1, f) != 1) return false;
-
-    // Effects TODO
-    // Reset pointers to NULL to prevent crashes
-    e->effects.items = NULL;
-    e->effects.count = 0;
-    e->effects.capacity = 0;
-
-    return true;
 }
 
 bool load_game_data(void)
@@ -1126,7 +1332,7 @@ bool load_game_data(void)
     // Player
     if (!load_entity(save_file, &game.data.player.entity)) goto fail;
     if (fread(&game.data.player.xp, sizeof(size_t), 1, save_file) != 1) goto fail;
-    // TODO inventory
+    load_da(&game.data.player.inventory, load_item, save_file); 
 
     // POD
     if (fread(&game.data.current_room_index, sizeof(size_t),   1, save_file) != 1) goto fail;
@@ -1137,16 +1343,7 @@ bool load_game_data(void)
     if (fread(&game.data.items_rng,          sizeof(RNG),      1, save_file) != 1) goto fail;
 
     // Rooms TODO
-    //da_clear(&game.data.entities);
-    //size_t count = 0;
-    //if (fread(&count, sizeof(size_t), 1, save_file) != 1) goto fail;
-    //if (count > 0) {
-    //    game.data.entities.count = count;
-    //    game.data.entities.capacity = count;
-    //    game.data.entities.items = malloc(count * sizeof(Entity));
-    //    da_foreach (game.data.entities, Entity*, e)
-    //        if (!load_entity(save_file, *e)) goto fail;
-    //}
+    load_da(&game.data.rooms, load_room, save_file);
 
     fclose(save_file);
     return true;
@@ -1162,7 +1359,7 @@ void advance_save_timer(float dt)
     game.save_timer += dt;
     if (game.save_timer >= SAVE_TIME_INTERVAL) {
         game.save_timer = 0.f;
-        if (!save_game_data()) print_error_and_exit("Could not save game");
+        save_game_data();
     }
 }
 
@@ -1267,7 +1464,7 @@ void game_init()
 {
     if (!load_game_data()) {
         init_game_data();
-        if (!save_game_data()) print_error_and_exit("Could not save game data to %s", SAVE_FILEPATH);
+        save_game_data();
     }
 }
 
@@ -1275,9 +1472,9 @@ bool entity_can_move(Entity *e)
 {
     V2i d = direction_vector(e->direction);
     return (e->pos.x + d.x >= 0
-         && (size_t)e->pos.x + d.x <= CURRENT_ROOM->tilemap.width
+         && (size_t)e->pos.x + d.x < CURRENT_ROOM->tilemap.width
          && e->pos.y + d.y >= 0
-         && (size_t)e->pos.y + d.y <= CURRENT_ROOM->tilemap.height
+         && (size_t)e->pos.y + d.y < CURRENT_ROOM->tilemap.height
          && tile_at(CURRENT_ROOM, e->pos.x + d.x, e->pos.y + d.y).type != TILE_WALL);
 }
 
@@ -1358,8 +1555,30 @@ void player_interact_with_door(Tile *door)
     }
 }
 
+void player_die_from_entity(Entity *e)
+{
+    if (e) {
+        write_message("YOU GOT KILLED by %s", e->name);
+        // TODO monster level up etc.
+    } else {
+        write_message("YOU DIED");
+    }
+    // TODO: think about what should happen next
+    // - lose levels, items or something else?
+    if (PLAYER_ENTITY->level > 0) PLAYER_ENTITY->level -= 1;
+    game.data.current_room_index = 0; // maybe go to initial room
+                                      // (that could be "safer", less to no monsters, some way to heal...)
+
+    PLAYER_ENTITY->pos = (V2i){1, 1}; // just to see something
+    PLAYER_ENTITY->stats.hp = 100*PLAYER_ENTITY->level; // TODO okaye, I got it:
+                                                        // levels give base stats and items add them up
+                                                        // so, now I just have to calculate what is the base hp
+                                                        // for the level;
+}
+
 void player_kill_entity(Entity *e)
 {
+    // TODO: think about what should happen
     PLAYER_ENTITY->level += 1;
     PLAYER->xp += e->level;
     e->dead = true;
@@ -1368,8 +1587,32 @@ void player_kill_entity(Entity *e)
 void player_interact_with_entities(EntitiesIndices *entities)
 {
     da_foreach (*entities, size_t, i) {
-        Entity *e = &CURRENT_ROOM->entities.items[*i];
-        player_kill_entity(e);
+        Entity *entity = &CURRENT_ROOM->entities.items[*i];
+
+        da_foreach (PLAYER_ENTITY->effects, Effect, player_effect) {
+            EffectDefinition *effect_definition = get_effect(player_effect->type);
+            // TODO: think how to handle effects that affect multiple entities/tiles
+            log_this("Effect: %s", effect_definition->name);
+            effect_definition->action(player_effect, PLAYER_ENTITY, entity);
+        }
+        bool entity_dies = entity->stats.hp <= 0;
+        if (entity_dies) player_kill_entity(entity);
+        if (PLAYER_ENTITY->stats.hp <= 0) {
+            player_die_from_entity(entity_dies ? NULL : entity);
+            return;
+        }
+
+        da_foreach (entity->effects, Effect, entity_effect) {
+            EffectDefinition *effect_definition = get_effect(entity_effect->type);
+            log_this("Effect: %s", effect_definition->name);
+            effect_definition->action(entity_effect, entity, PLAYER_ENTITY);
+        }
+        entity_dies = entity->stats.hp <= 0;
+        if (entity_dies) player_kill_entity(entity);
+        if (PLAYER_ENTITY->stats.hp <= 0) {
+            player_die_from_entity(entity_dies ? NULL : entity);
+            return;
+        }
     }
 }
 
@@ -1463,13 +1706,13 @@ void process_pressed_key(void)
                 da_remove(&CURRENT_ROOM->entities, entities->items[0]);
             break;
 
-        case CTRL('S'):
-            if (!save_game_data()) print_error_and_exit("Could not save game");
-            break;
+        case CTRL('S'): save_game_data(); break;
+
+        // TODO: make a command to clear the save_file and reinitialize the game
 
         case CTRL('Q'):
-            if (save_game_data()) quit();
-            else print_error_and_exit("Could not save game");
+            save_game_data();
+            quit();
 
         case ESC:
             if (game.show_entities_info.enabled) {
