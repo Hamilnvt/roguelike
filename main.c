@@ -115,7 +115,7 @@ static uint64_t splitmix64(uint64_t *x)
     return z ^ (z >> 31);
 }
 
-void rng_initialize(RNG *rng, uint64_t seed)
+void rng_init(RNG *rng, uint64_t seed)
 {
     uint64_t sm_state = seed;
     rng->state[0] = splitmix64(&sm_state);
@@ -201,22 +201,25 @@ typedef struct
 
 typedef enum
 {
-    EFFECT_ATTACK,
     EFFECT_HEAL,
     EFFECT_POISON,
     EFFECT_FIRE,
     __effect_types_count
 } EffectType;
 
-#define EFFECT_PERSISTENT -1
+#define PERSISTENT_EFFECT -1
+#define EFFECT_WAS_NOT_APPLIED_BY_ENTITY -1
 typedef struct
 {
     EffectType type;
+    int applied_by; // TODO: it could be dangerous, when an entity dies I should check all the other entities to see
+                    // if it applied an effect to it and set it to EFFECT_WAS_NOT_APPLIED_BY_ENTITY
+                    // (which is technically false, but it works)
     size_t value;
     int duration;
 } Effect;
 
-static_assert(__effect_types_count == 4, "Make all effects in make_effect");
+static_assert(__effect_types_count == 3, "Make all effects in make_effect");
 Effect make_effect(EffectType type, ...)
 {
     va_list args;
@@ -225,7 +228,6 @@ Effect make_effect(EffectType type, ...)
     switch (type)
     {
     // TODO
-    case EFFECT_ATTACK: break;
     case EFFECT_HEAL:   break;
     case EFFECT_POISON: break;
     case EFFECT_FIRE:   break;
@@ -249,7 +251,7 @@ typedef struct
 typedef struct
 {
     int attack;
-    int chance;
+    int accuracy;
     int hp;
     int defense;
     int agility;
@@ -335,9 +337,18 @@ char get_direction_char(Direction dir)
     }
 }
 
+typedef enum
+{
+    ENTITY_PLAYER,
+    ENTITY_GENERIC, // TODO: just to distinguish from the player (it will not exist later)
+    __entity_types_count
+} EntityType;
+
+// TODO:
 #define ENTITY_NAME_MAX_LEN 31
 typedef struct Entity
 {
+    EntityType type;
     char name[ENTITY_NAME_MAX_LEN + 1];
     V2i pos;
     Direction direction;
@@ -350,6 +361,10 @@ typedef struct Entity
 
     Equipment equipment;
     Effects effects; 
+
+    union {
+        // TODO: if entity is player then all the Player's struct fields will be inserted here so that player is just an entity, but can have move fields (like a necromancer: different EntityType -> different 'dispatch' fields)
+    };
 } Entity;
 
 typedef struct
@@ -449,6 +464,7 @@ typedef struct
     RNG rooms_rng;
     RNG entities_rng;
     RNG items_rng;
+    RNG combat_rng;
 
     Rooms rooms;
 } Data;
@@ -490,6 +506,7 @@ static inline EntitiesIndices *get_entities_under_player(void)
 static inline uint64_t rooms_rng_generate   (void) { return rng_generate(&game.data.rooms_rng); }
 static inline uint64_t entities_rng_generate(void) { return rng_generate(&game.data.entities_rng); }
 static inline uint64_t items_rng_generate   (void) { return rng_generate(&game.data.items_rng); }
+static inline uint64_t combat_rng_generate   (void) { return rng_generate(&game.data.combat_rng); }
 
 void rng_log(RNG rng)
 {
@@ -514,16 +531,15 @@ static inline Entity make_entity_random_at(size_t x, size_t y)
         .stats = (Stats){
             .hp      = entities_rng_generate() % (100*(e.rank+1)),
             .defense = entities_rng_generate() % (10*(e.rank+1)),
-            .chance  = entities_rng_generate() % (100*(e.rank+1)),
+            .accuracy = entities_rng_generate() % (100*(e.rank+1)),
             .attack  = entities_rng_generate() % (100*(e.rank+1)),
             .agility = entities_rng_generate() % (10*(e.rank+1))
         },
         .movement_timer = entities_rng_generate() % 10 + 2
     };
 
-    add_effect_to_entity(make_effect(EFFECT_ATTACK), &e);
-
-    memcpy(e.name, "Entity", 6); // TODO: random name
+    static size_t entity_number = 0;
+    snprintf(e.name, sizeof(e.name), "Entity %zu", entity_number++); // TODO: random name
 
     return e;
 }
@@ -761,7 +777,7 @@ void write_message(const char *fmt, ...)
 }
 
 
-#define EFFECTACTION_PARAMETERS Effect *effect, Entity *user, Entity *target
+#define EFFECTACTION_PARAMETERS Effect *effect, Entity *actor
 typedef void (* EffectAction)(EFFECTACTION_PARAMETERS);
 typedef struct
 {
@@ -771,17 +787,7 @@ typedef struct
 
 #define UNUSED_EFFECTACTION_PARAMETERS \
     (void)effect;                      \
-    (void)user;                        \
-    (void)target;                      \
-
-void effect_attack(EFFECTACTION_PARAMETERS)
-{
-    (void)effect;
-    (void)user;
-
-    write_message("Attack!");
-    target->stats.hp -= user->stats.attack;
-}
+    (void)actor;                       \
 
 void effect_heal(EFFECTACTION_PARAMETERS)
 {
@@ -804,12 +810,11 @@ void effect_fire(EFFECTACTION_PARAMETERS)
     write_message("Fire!");
 }
 
-static_assert(__effect_types_count == 4, "Add all effects to effects_definitions");
-static const EffectDefinition effects_definitions[] = {
-    [EFFECT_ATTACK] = { "Attack", effect_attack },
-    [EFFECT_HEAL]   = {0},
-    [EFFECT_POISON] = {0},
-    [EFFECT_FIRE]   = {0}
+static_assert(__effect_types_count == 3, "Add all effects to effects_definitions");
+static const EffectDefinition effects_definitions[__effect_types_count] = {
+    [EFFECT_HEAL]   = { "Heal",   effect_heal },
+    [EFFECT_POISON] = { "Poison", effect_poison },
+    [EFFECT_FIRE]   = { "Fire",   effect_fire }
 };
 
 const EffectDefinition *get_effect(EffectType type)
@@ -873,6 +878,7 @@ typedef enum
     ALT_p,
 
     CTRL_ALT_C,
+    CTRL_ALT_D,
     CTRL_ALT_E,
     CTRL_ALT_K,
     CTRL_ALT_J,
@@ -1011,7 +1017,7 @@ void show_entity_info(Entity *e)
     if (entity_is_player(e)) wprintw(win_right.win, "(%zu exp)", game.data.player.xp);
     mvwprintw(win_right.win, line++, 1, "Health: %d", e->stats.hp);
     mvwprintw(win_right.win, line++, 1, "Defense: %d", e->stats.defense);
-    mvwprintw(win_right.win, line++, 1, "Attack: %d (%d%%)", e->stats.attack, e->stats.chance);
+    mvwprintw(win_right.win, line++, 1, "Attack: %d (%d%%)", e->stats.attack, e->stats.accuracy);
     mvwprintw(win_right.win, line++, 1, "Agility: %d", e->stats.agility);
     mvwprintw(win_right.win, line++, 1, "Effects: ");
     if (da_is_empty(&e->effects)) {
@@ -1100,7 +1106,7 @@ void ncurses_init(void)
 #define COLOR_VALUE_TO_NCURSES(value) ((value*1000)/255)
 #define RGB_TO_NCURSES(r, g, b) COLOR_VALUE_TO_NCURSES(r), COLOR_VALUE_TO_NCURSES(g), COLOR_VALUE_TO_NCURSES(b)
 
-void initialize_colors(void)
+void colors_init(void)
 {
     if (has_colors()) {
         start_color();
@@ -1279,6 +1285,7 @@ void save_game_data(void)
     fwrite(&game.data.rooms_rng,          sizeof(RNG),      1, save_file);
     fwrite(&game.data.entities_rng,       sizeof(RNG),      1, save_file);
     fwrite(&game.data.items_rng,          sizeof(RNG),      1, save_file);
+    fwrite(&game.data.combat_rng,         sizeof(RNG),      1, save_file);
 
     // Rooms
     save_da(game.data.rooms, save_room, save_file);
@@ -1292,9 +1299,10 @@ void init_game_data(void)
     // RNGs
     uint64_t seed = time(NULL);
     game.data.rng_seed = seed;
-    rng_initialize(&game.data.rooms_rng,    seed++);
-    rng_initialize(&game.data.entities_rng, seed++);
-    rng_initialize(&game.data.items_rng,    seed++);
+    rng_init(&game.data.rooms_rng,    seed++);
+    rng_init(&game.data.entities_rng, seed++);
+    rng_init(&game.data.items_rng,    seed++);
+    rng_init(&game.data.combat_rng,   seed++);
 
     // Player
     Entity player_entity = {0};
@@ -1305,12 +1313,10 @@ void init_game_data(void)
     player_entity.stats = (Stats) {
         .hp      = 100,
         .defense = 5,
-        .chance  = 75,
+        .accuracy = 75,
         .attack  = 10,
         .agility = 75
     };
-
-    add_effect_to_entity(make_effect(EFFECT_ATTACK), &player_entity);
 
     game.data.player.entity = player_entity;
 
@@ -1322,6 +1328,12 @@ void init_game_data(void)
     if (!get_random_entity_slot_as_vector(CURRENT_ROOM, &pos))
         print_error_and_exit("It should never happen");
     game.data.player.entity.pos = pos;
+}
+
+void delete_and_reinit_game_data(void)
+{
+    init_game_data();
+    save_game_data();
 }
 
 bool load_game_data(void)
@@ -1341,6 +1353,7 @@ bool load_game_data(void)
     if (fread(&game.data.rooms_rng,          sizeof(RNG),      1, save_file) != 1) goto fail;
     if (fread(&game.data.entities_rng,       sizeof(RNG),      1, save_file) != 1) goto fail;
     if (fread(&game.data.items_rng,          sizeof(RNG),      1, save_file) != 1) goto fail;
+    if (fread(&game.data.combat_rng,         sizeof(RNG),      1, save_file) != 1) goto fail;
 
     // Rooms TODO
     load_da(&game.data.rooms, load_room, save_file);
@@ -1412,6 +1425,7 @@ int read_key()
         case ':'          : return ALT_COLON;
 
         case CTRL('C'): return CTRL_ALT_C;
+        case CTRL('D'): return CTRL_ALT_D;
         case CTRL('E'): return CTRL_ALT_E;
         case CTRL('K'): return CTRL_ALT_K;
         case CTRL('J'): return CTRL_ALT_J;
@@ -1555,63 +1569,195 @@ void player_interact_with_door(Tile *door)
     }
 }
 
-void player_die_from_entity(Entity *e)
+static inline void player_killed_entity(Entity *e)
 {
-    if (e) {
-        write_message("YOU GOT KILLED by %s", e->name);
-        // TODO monster level up etc.
-    } else {
-        write_message("YOU DIED");
-    }
-    // TODO: think about what should happen next
-    // - lose levels, items or something else?
-    if (PLAYER_ENTITY->level > 0) PLAYER_ENTITY->level -= 1;
-    game.data.current_room_index = 0; // maybe go to initial room
-                                      // (that could be "safer", less to no monsters, some way to heal...)
-
-    PLAYER_ENTITY->pos = (V2i){1, 1}; // just to see something
-    PLAYER_ENTITY->stats.hp = 100*PLAYER_ENTITY->level; // TODO okaye, I got it:
-                                                        // levels give base stats and items add them up
-                                                        // so, now I just have to calculate what is the base hp
-                                                        // for the level;
-}
-
-void player_kill_entity(Entity *e)
-{
-    // TODO: think about what should happen
+    write_message("You killed %s", e->name);
+    e->dead = true;
     PLAYER_ENTITY->level += 1;
     PLAYER->xp += e->level;
-    e->dead = true;
+    // TODO: think about what should happen
 }
+
+static inline void entity_killed_player(Entity *e)
+{
+    write_message("%s killed you", e->name);
+    // TODO: think about what should happen
+}
+
+static inline void entity_killed_itself(Entity *e)
+{
+    write_message("%s killed itself", e->name);
+    // TODO
+}
+
+static inline void player_killed_themselves(void)
+{
+    write_message("You killed yourself");
+    // TODO
+}
+
+static inline void entity_killed_entity(Entity *killer, Entity *victim)
+{
+    write_message("%s killed %s", killer->name, victim->name);
+    victim->dead = true;
+    // TODO
+}
+
+void dispatch_kill(Entity *killer, Entity *victim)
+{
+    bool player_is_killer = entity_is_player(killer);
+    bool player_is_victim = entity_is_player(victim);
+
+    if (player_is_killer && player_is_victim) player_killed_themselves();
+    else if (player_is_killer) player_killed_entity(victim);
+    else if (player_is_victim) entity_killed_player(killer);
+    else if (killer == victim) entity_killed_itself(killer);
+    else entity_killed_entity(killer, victim);
+}
+
+typedef enum
+{
+    DEATH_BY_ENTITY_ATTACK,
+    DEATH_BY_EFFECT,
+    __death_causes_count
+} DeathCause;
+
+static_assert(__death_causes_count == 2, "Make the entities die from each death cause");
+// TODO: I don't think this function is really needed, I can make one function for each death cause, reducing complexity
+void entity_die(Entity *entity, DeathCause cause, ...)
+{
+    va_list args;
+    va_start(args, cause);
+
+    bool player_is_dying = entity_is_player(entity);
+    if (!player_is_dying) entity->dead = true;
+
+    switch (cause)
+    {
+    case DEATH_BY_ENTITY_ATTACK:
+        Entity *attacker = va_arg(args, Entity*);
+        dispatch_kill(attacker, entity);
+        break;
+
+    case DEATH_BY_EFFECT: break;
+        Effect *effect = va_arg(args, Effect*);
+        EffectDefinition *def = get_effect(effect->type);
+        if (effect->applied_by == EFFECT_WAS_NOT_APPLIED_BY_ENTITY) {
+            write_message("YOU DIED from effect %s", def->name);
+        } else {
+            Entity *entity = &CURRENT_ROOM->entities.items[effect->applied_by]; // TODO: attenzione
+            write_message("YOU DIED from effect %s applied by %s", def->name, entity->name);
+        }
+        break;
+
+    case __death_causes_count:
+    default:
+        print_error_and_exit("Unreachable death cause %u in player_die", cause);
+    }
+
+    va_end(args);
+
+    if (player_is_dying) {
+        // TODO: think about what should happen next
+        // - lose levels, items or something else?
+        if (PLAYER_ENTITY->level > 1) PLAYER_ENTITY->level -= 1;
+        game.data.current_room_index = 0; // maybe go to initial room
+                                          // (that could be "safer", less to no monsters, some way to heal...)
+
+        PLAYER_ENTITY->pos = (V2i){1, 1}; // just to see something
+        PLAYER_ENTITY->stats.hp = 100*PLAYER_ENTITY->level; // TODO okaye, I got it:
+                                                            // levels give base stats and items add them up
+                                                            // so, now I just have to calculate what is the base hp
+                                                            // for the level;
+    } else {
+        // TODO: I don't know, a necromancer here would spawn its last gremlin's wave
+    }
+}
+
+static_assert(__death_causes_count == 2,
+        "Create two wrapper functions for each death cause (one for generic entities and one for player");
+static inline void entity_die_from_entity_attack(Entity *entity, Entity *attacker)
+{
+    entity_die(entity, DEATH_BY_ENTITY_ATTACK, attacker);
+}
+static inline void entity_die_from_effect(Entity *entity, Effect *effect)
+{
+    entity_die(entity, DEATH_BY_EFFECT, effect);
+}
+static inline void player_die_from_entity_attack(Entity *attacker)
+{
+    entity_die_from_entity_attack(PLAYER_ENTITY, attacker);
+}
+static inline void player_die_from_effect(Effect *effect) { entity_die_from_effect(PLAYER_ENTITY, effect); }
+
+static inline bool entity_is_dead(Entity *entity) { return entity->stats.hp <= 0; }
+
+typedef enum
+{
+    ESTATUS_OK,
+    ESTATUS_DEAD
+} EntityStatus;
+
+EntityStatus apply_entity_effects(Entity *entity)
+{
+    da_foreach (entity->effects, Effect, effect) {
+        EffectDefinition *effect_definition = get_effect(effect->type);
+        log_this("Applying '%s' to %s", effect_definition->name, entity->name);
+        effect_definition->action(effect, entity);
+        if (entity_is_dead(entity)) {
+            entity_die_from_effect(entity, effect);
+            return ESTATUS_DEAD;
+        }
+    }
+    return ESTATUS_OK;
+}
+static inline EntityStatus apply_player_effects(void) { return apply_entity_effects(PLAYER_ENTITY); }
+
+EntityStatus entity_attack_entity(Entity *attacker, Entity *defender)
+{
+    write_message("%s is attacking %s", attacker->name, defender->name);
+    if (attacker->stats.accuracy <= 0) {
+        write_message("%s missed the attack, didn't even try", attacker->name);
+        return ESTATUS_OK;
+    }
+    int multiplier = attacker->stats.accuracy / 100;
+    uint64_t accuracy = attacker->stats.accuracy % 100;
+    if (accuracy > 0 && (combat_rng_generate() % 100) >= accuracy) multiplier += 1;
+    if (multiplier <= 0) {
+        write_message("%s missed the attack, unlucky", attacker->name);
+        return ESTATUS_OK;
+    }
+    int damage = attacker->stats.attack*multiplier;
+    int total_damage = damage - defender->stats.defense;
+    if (total_damage <= 0) {
+        write_message("%s defended %d damage, unbothered", defender->name, damage);
+        return ESTATUS_OK;
+    }
+    write_message("%s inflicted %u damage, ouch", attacker->name, total_damage);
+    defender->stats.hp -= total_damage;
+    if (entity_is_dead(defender)) {
+        entity_die_from_entity_attack(defender, attacker);    
+        return ESTATUS_DEAD;
+    }
+    return ESTATUS_OK;
+}
+static inline EntityStatus player_attack_entity(Entity *entity) { return entity_attack_entity(PLAYER_ENTITY, entity); }
+static inline EntityStatus entity_attack_player(Entity *entity) { return entity_attack_entity(entity, PLAYER_ENTITY); }
 
 void player_interact_with_entities(EntitiesIndices *entities)
 {
+    if (apply_player_effects() == ESTATUS_DEAD) return;
+
     da_foreach (*entities, size_t, i) {
         Entity *entity = &CURRENT_ROOM->entities.items[*i];
+        if (apply_entity_effects(entity) == ESTATUS_DEAD) continue;
 
-        da_foreach (PLAYER_ENTITY->effects, Effect, player_effect) {
-            EffectDefinition *effect_definition = get_effect(player_effect->type);
-            // TODO: think how to handle effects that affect multiple entities/tiles
-            log_this("Effect: %s", effect_definition->name);
-            effect_definition->action(player_effect, PLAYER_ENTITY, entity);
-        }
-        bool entity_dies = entity->stats.hp <= 0;
-        if (entity_dies) player_kill_entity(entity);
-        if (PLAYER_ENTITY->stats.hp <= 0) {
-            player_die_from_entity(entity_dies ? NULL : entity);
-            return;
-        }
-
-        da_foreach (entity->effects, Effect, entity_effect) {
-            EffectDefinition *effect_definition = get_effect(entity_effect->type);
-            log_this("Effect: %s", effect_definition->name);
-            effect_definition->action(entity_effect, entity, PLAYER_ENTITY);
-        }
-        entity_dies = entity->stats.hp <= 0;
-        if (entity_dies) player_kill_entity(entity);
-        if (PLAYER_ENTITY->stats.hp <= 0) {
-            player_die_from_entity(entity_dies ? NULL : entity);
-            return;
+        if (PLAYER_ENTITY->stats.agility >= entity->stats.agility) {
+            if (player_attack_entity(entity) == ESTATUS_DEAD) continue;
+            if (entity_attack_player(entity) == ESTATUS_DEAD) return;
+        } else {
+            if (entity_attack_player(entity) == ESTATUS_DEAD) return;
+            if (player_attack_entity(entity) == ESTATUS_DEAD) continue;
         }
     }
 }
@@ -1708,7 +1854,7 @@ void process_pressed_key(void)
 
         case CTRL('S'): save_game_data(); break;
 
-        // TODO: make a command to clear the save_file and reinitialize the game
+        case CTRL_ALT_D: delete_and_reinit_game_data(); break;
 
         case CTRL('Q'):
             save_game_data();
@@ -1790,7 +1936,7 @@ int main(int argc, char **argv)
 
     signal(SIGWINCH, handle_sigwinch);
     ncurses_init();
-    initialize_colors();
+    colors_init();
     create_windows();
     game_init();
 
