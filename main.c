@@ -18,7 +18,6 @@
  * - maybe if an entity spawns on top of another entity it triggers some event:
  *   > on player: ambush
  *   > on another entity: combat
- * - make entities_map a map to a da of pointer to entities so that many entities can exist in the same tile
  * - when hovering on entities pressing 'i' shows their stats in the right window
  * - since now entities can stack, there's no need to check if two of them "collide" they are just put in the same tile
  * - monsters drop key to open doors
@@ -39,6 +38,8 @@
  *   > monsters killed
  *   > deaths
  *   ...
+ * - when in combat, entities of the same faction do not attack each other (but effects are applied)
+ * - equip items (and apply stats and effects (the latter in combat to the defender))
 */
 
 #include <string.h>
@@ -53,7 +54,7 @@
 #include <unistd.h>
 
 #include "dynamic_arrays.h"
-#define STRING_IMPLEMENTATION
+#define STRINGS_IMPLEMENTATION
 #include "strings.h"
 
 #define DEBUG true
@@ -246,7 +247,7 @@ typedef struct
 {
     int attack;
     int accuracy;
-    int hp;
+    int health;
     int defense;
     int agility;
 } Stats;
@@ -259,7 +260,7 @@ typedef enum
     ITEM_SCARF,
     ITEM_CHESTPLATE,
     ITEM_CHAUSSES,
-    ITEM_SHOES,
+    ITEM_SHOE,
     ITEM_GLOVE,
     ITEM_SWORD,
     ITEM_SHIELD,
@@ -268,22 +269,113 @@ typedef enum
     __item_types_count
 } ItemType;
 
+const char *get_item_type_string(ItemType type)
+{
+    switch (type)
+    {
+    case ITEM_HELMET:     return "Helmet";
+    case ITEM_HAT:        return "Hat";
+    case ITEM_GOGGLES:    return "Goggles";
+    case ITEM_SCARF:      return "Scarf";
+    case ITEM_CHESTPLATE: return "Chestplate";
+    case ITEM_CHAUSSES:   return "Chausses";
+    case ITEM_SHOE:       return "Shoe";
+    case ITEM_GLOVE:      return "Glove";
+    case ITEM_SWORD:      return "Sword";
+    case ITEM_SHIELD:     return "Shield";
+    case ITEM_SCROLL:     return "Scroll";
+    case ITEM_STAFF:      return "Staff";
+
+    case __item_types_count:
+    default:
+        print_error_and_exit("Unreachable item type %u in get_item_type_string", type);
+    }
+}
+
 #define ITEM_NAME_MAX_LEN 31
 typedef struct
 {
     ItemType type;
     char name[ITEM_NAME_MAX_LEN + 1];
+    V2i pos;
     int durability;
     Stats stats;
-
+    bool picked_up;
     Effects effects;
 } Item;
+
+typedef struct
+{
+    Item *items;
+    size_t count;
+    size_t capacity;
+} Items;
+
+typedef struct
+{
+    size_t *items;
+    size_t count;
+    size_t capacity;
+} ItemsIndices;
+
+static inline uint64_t items_rng_generate(void);
+Item make_item_random_of_type(ItemType type)
+{
+    Item item = {
+        .type = type,
+        .durability = items_rng_generate() % 100
+    };
+
+    String item_name = {0};
+    static size_t item_number = 1;
+    s_push_fstr(&item_name, "%s %zu", get_item_type_string(type), item_number);
+    strncpy(item.name, item_name.items, item_name.count);
+    s_free(&item_name);
+
+    switch (type)
+    {
+    case ITEM_HELMET:
+    case ITEM_HAT:        
+    case ITEM_GOGGLES:   
+    case ITEM_SCARF:      
+    case ITEM_CHESTPLATE: 
+    case ITEM_CHAUSSES:
+    case ITEM_SHOE:       
+    case ITEM_GLOVE:      
+    case ITEM_SWORD:      
+    case ITEM_SHIELD:     
+    case ITEM_SCROLL:     
+    case ITEM_STAFF:      
+        break; // TODO: each item type gives different stats
+
+    case __item_types_count:
+    default:
+        print_error_and_exit("Unreachable item type %u in make_item_random_of_type", type);
+    }
+
+    // TODO: for now
+    item.stats = (Stats) {
+        .attack   = items_rng_generate() % 100,
+        .accuracy = items_rng_generate() % 100,
+        .health   = items_rng_generate() % 200,
+        .defense  = items_rng_generate() % 100,
+        .agility  = items_rng_generate() % 100,
+    };
+
+    return item;
+}
+
+static inline Item make_item_random(void)
+{ return make_item_random_of_type(items_rng_generate() % __item_types_count); }
 
 typedef struct
 {
     ItemType type;
     Item item;
 } ItemSlot;
+
+static inline ItemSlot make_item_slot_random(void)
+{ return (ItemSlot){ .type = items_rng_generate() % __item_types_count }; }
 
 typedef struct
 {
@@ -345,6 +437,19 @@ typedef enum
     __entity_types_count
 } EntityType;
 
+const char *get_entity_type_string(EntityType type)
+{
+    switch (type)
+    {
+    case ENTITY_PLAYER: return "Player";
+    case ENTITY_GENERIC: return "Generic";
+
+    case __entity_types_count:
+    default:
+        print_error_and_exit("Unreachable entity type %u in get_entity_type_string", type);
+    }
+}
+
 typedef struct
 {
     uint64_t id;
@@ -387,7 +492,9 @@ typedef struct Entity
     size_t level;
     float movement_timer;
 
-    Stats stats;
+    int current_health;
+    Stats base_stats;
+    Stats extra_stats;
 
     Equipment equipment;
     Effects effects; 
@@ -414,9 +521,9 @@ typedef struct
     size_t capacity;
 } EntitiesIds;
 
-char get_entity_char(const Entity *e)
+char get_entity_char(EntityRank rank)
 {
-    switch (e->rank)
+    switch (rank)
     {
     case RANK_CIVILIAN:  return 'c';
     case RANK_WARRIOR:   return 'w';
@@ -426,7 +533,7 @@ char get_entity_char(const Entity *e)
     case RANK_WORLDLORD: return 'W';
 
     case __entity_ranks_count:
-    default: print_error_and_exit("Unreachable entity rank %u in get_entity_char", e->rank);
+    default: print_error_and_exit("Unreachable entity rank %u in get_entity_char", rank);
     }
 }
 
@@ -462,8 +569,8 @@ typedef struct Room
     TileMap tilemap;
     Entities entities;
     EntitiesIds *entities_map;
-    //Items items; // TODO
-    //ItemsIds *items_map;
+    Items items;
+    ItemsIndices *items_map;
 } Room;
 
 typedef struct
@@ -475,18 +582,14 @@ typedef struct
 
 static inline size_t index_in_room(Room *room, size_t x, size_t y) { return y*room->tilemap.width + x; }
 static inline V2i pos_in_room(Room *room, size_t i)
-{
-    return (V2i){i%room->tilemap.width, (size_t)(i/room->tilemap.height)};
-}
+{ return (V2i){i%room->tilemap.width, (size_t)(i/room->tilemap.height)}; }
 static inline Tile *tile_at(Room *room, size_t x, size_t y)
-{
-    return &room->tilemap.tiles[index_at(x, y, room->tilemap.width)];
-}
+{ return &room->tilemap.tiles[index_at(x, y, room->tilemap.width)]; }
 static inline size_t room_tiles_count(Room *room) { return room->tilemap.width*room->tilemap.height; }
 static inline EntitiesIds *entities_at(Room *room, size_t x, size_t y) 
-{
-    return &room->entities_map[index_in_room(room, x, y)];
-}
+{ return &room->entities_map[index_in_room(room, x, y)]; }
+static inline ItemsIndices *items_at(Room *room, size_t x, size_t y) 
+{ return &room->items_map[index_in_room(room, x, y)]; }
 
 typedef struct
 {
@@ -522,6 +625,8 @@ typedef struct
 
     bool looking;
     bool showing_general_info;
+    bool showing_help;
+    bool showing_tooltips;
     struct {
         bool enabled;
         size_t index;
@@ -533,7 +638,8 @@ static Game game = {0};
 #define CURRENT_ROOM (&game.data.rooms.items[game.data.current_room_index])
 #define PLAYER (&game.data.player)
 static inline bool entity_is_player(Entity *e) { return e == &game.data.player; }
-static inline bool entity_is_dead(Entity *entity) { return entity->stats.hp <= 0 || entity->dead; }
+static inline bool entity_is_dead(Entity *entity)
+{ return entity->current_health <= 0 || entity->dead; }
 
 static inline Tile *get_tile_under_player(void)
 {
@@ -790,6 +896,25 @@ Faction *get_faction_by_id(uint64_t id, size_t *index)
     return NULL;
 }
 
+static inline Stats stats_sum(Stats s1, Stats s2)
+{
+    return (Stats){
+        .attack   = s1.attack   + s2.attack,
+        .accuracy = s1.accuracy + s2.accuracy,
+        .health   = s1.health   + s2.health,
+        .defense  = s1.defense  + s2.defense,
+        .agility  = s1.agility  + s2.agility
+    };
+}
+
+Stats entity_get_extra_stats_from_equipment(Entity *e)
+{
+    Stats stats = {0};
+    da_foreach (e->equipment, ItemSlot, item_slot)
+        stats = stats_sum(stats, item_slot->item.stats);     
+    return stats;
+}
+
 static uint64_t entity_id_counter = 1;
 Entity make_entity_random_at(size_t x, size_t y)
 {
@@ -801,8 +926,8 @@ Entity make_entity_random_at(size_t x, size_t y)
         .direction = entities_rng_generate() % __directions_count,
         .rank      = entities_rng_generate() % __entity_ranks_count,
         .level     = entities_rng_generate() % (10*(e.rank+1)) + 1,
-        .stats = (Stats){
-            .hp      = entities_rng_generate() % (100*(e.rank+1)),
+        .base_stats = (Stats){
+            .health  = entities_rng_generate() % (100*(e.rank+1)),
             .defense = entities_rng_generate() % (10*(e.rank+1)),
             .accuracy = entities_rng_generate() % (100*(e.rank+1)),
             .attack  = entities_rng_generate() % (100*(e.rank+1)),
@@ -810,6 +935,18 @@ Entity make_entity_random_at(size_t x, size_t y)
         },
         .movement_timer = entities_rng_generate() % 10 + 2
     };
+
+    size_t items_count = entities_rng_generate() % (e.rank+1);
+    for (size_t i = 0; i < items_count; i++) {
+        ItemSlot item_slot = make_item_slot_random();
+        Item item = make_item_random_of_type(item_slot.type);
+        item.picked_up = true;
+        item_slot.item = item;
+        da_push(&e.equipment, item_slot);
+    }
+
+    e.extra_stats = entity_get_extra_stats_from_equipment(&e);
+    e.current_health = e.base_stats.health + e.extra_stats.health;
 
     snprintf(e.name, sizeof(e.name), "Entity %lu", e.id); // TODO: random name
 
@@ -840,8 +977,15 @@ void spawn_random_entity(Room *room)
     if (!get_random_entity_slot_as_vector(room, &pos)) return;
     Entity e = make_entity_random_at(pos.x, pos.y);
     da_push(&room->entities, e);
-    EntitiesIds *entities = entities_at(room, pos.x, pos.y);
-    da_push(entities, e.id);
+}
+
+void spawn_random_item(Room *room)
+{
+    V2i pos;
+    if (!get_random_entity_slot_as_vector(room, &pos)) return;
+    Item item = make_item_random();
+    item.pos = pos;
+    da_push(&room->items, item);
 }
 
 Tile *create_tiles(size_t width, size_t height)
@@ -867,7 +1011,9 @@ Room *generate_room(size_t width, size_t height) // TODO: add a from Room to ens
             .tiles = create_tiles(width, height)
         },
         .entities = (Entities){0},
-        .entities_map = malloc(sizeof(EntitiesIds)*width*height) // TODO: handle malloc fail
+        .entities_map = malloc(sizeof(EntitiesIds)*width*height), // TODO: handle malloc fail
+        .items = (Items){0},
+        .items_map = malloc(sizeof(ItemsIndices)*width*height) // TODO: handle malloc fail
     };
 
     // TODO: si puo' migliorare questo loop
@@ -891,6 +1037,11 @@ Room *generate_room(size_t width, size_t height) // TODO: add a from Room to ens
     size_t entities_count = (rooms_rng_generate() % 10) + 1;
     for (size_t i = 0; i < entities_count; i++) {
         spawn_random_entity(&room);
+    }
+
+    size_t items_count = (rooms_rng_generate() % 3) == 0 ? 1 : 0; // TODO: make a probability function based on rng
+    for (size_t i = 0; i < items_count; i++) {
+        spawn_random_item(&room);
     }
 
     room.index = game.data.rooms.count;
@@ -1061,23 +1212,35 @@ void update_window_main(void)
         for (size_t x = 0; x < CURRENT_ROOM->tilemap.width; x++) {
             const Tile *tile = tile_at(CURRENT_ROOM, x, y);
             EntitiesIds *entities = entities_at(CURRENT_ROOM, x, y);
+            ItemsIndices *items = items_at(CURRENT_ROOM, x, y);
+
             char c;
-            if (da_is_empty(entities)) c = get_tile_char(tile);
-            else {
-                if (tile->type == TILE_FLOOR) {
-                    Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[(size_t)game.switch_timer%entities->count]);
-                    if (!e || entity_is_dead(e)) continue;
-                    c = get_entity_char(e);
-                } else {
-                    size_t index = (size_t)game.switch_timer % (entities->count+1);
-                    if (index == entities->count) c = get_tile_char(tile);
-                    else {
-                        Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[index]);
-                        if (!e || entity_is_dead(e)) continue;
-                        c = get_entity_char(e);
-                    }
-                }
-            }
+
+            //if (da_is_empty(entities)) c = get_tile_char(tile);
+            //else {
+            //    if (tile->type == TILE_FLOOR) {
+            //        Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[(size_t)game.switch_timer%entities->count]);
+            //        if (!e || entity_is_dead(e)) continue;
+            //        c = get_entity_char(e->rank);
+            //    } else {
+            //        size_t index = (size_t)game.switch_timer % (entities->count+1);
+            //        if (index == entities->count) c = get_tile_char(tile);
+            //        else {
+            //            Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[index]);
+            //            if (!e || entity_is_dead(e)) continue;
+            //            c = get_entity_char(e->rank);
+            //        }
+            //    }
+            //}
+
+            // Priority: Entity > Item > Tile
+            if (!da_is_empty(entities)) {
+                 // ... existing entity rendering logic ...
+                 Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[(size_t)game.switch_timer%entities->count]);
+                 if (!e || entity_is_dead(e)) c = get_tile_char(tile); 
+                 else c = get_entity_char(e->rank);
+            } else if (!da_is_empty(items)) c = 'i'; 
+            else c = get_tile_char(tile);
             mvwaddch(win_main.win, y, x, c);
         }
     }
@@ -1089,73 +1252,56 @@ void update_window_main(void)
 void update_window_bottom(void)
 {
     werase(win_bottom.win);
-    //box(win_bottom.win, 0, 0); // TODO: just to try
 
-    // --- SECTION 1: MESSAGE LOG ---
-    // We reserve lines 1 to messages_display_height for text
-    const size_t messages_display_height = 5; // Adjust based on window size
-    const size_t start_y = 0;
-    const size_t start_x = 0;
+    if (game.looking) {
+        Tile *tile = game.looking ? get_looking_tile() : get_tile_under_player();
+        EntitiesIds *entities = game.looking ? get_looking_entities() : get_entities_under_player();
 
-    // Iterate backwards from the newest message
-    size_t count_printed = 0;
-    for (size_t i = 0; i < game.messages.count && count_printed < (size_t)messages_display_height; i++) {
-        // Calculate ring buffer index walking backwards
-        // (head - 1 - i) with wrap-around handling
-        size_t idx = (game.messages.head - 1 - i + MAX_MESSAGES) % MAX_MESSAGES;
-        
-        char *line = game.messages.lines[idx];
-        if (!line) continue;
+        size_t line = 0;
 
-        // Visual flair: Newest message is bright, older ones are dim
-        if (i == 0) wattron(win_bottom.win, A_BOLD);
-        else wattron(win_bottom.win, A_DIM);
+        switch (tile->type)
+        {
+            case TILE_FLOOR: wprintw(win_bottom.win, "Floor."); break;
+            case TILE_WALL:  wprintw(win_bottom.win, "Wall."); break;
+            case TILE_DOOR:
+                             if (tile->open) {
+                                 wprintw(win_bottom.win, "Open door (leads to room %d).", tile->leads_to >= 0 ? tile->leads_to : -1);
+                             } else {
+                                 wprintw(win_bottom.win, "Closed door (%s).", tile->heavy ? "Heavy" : "Normal");
+                             }
+                             break;
 
-        // Print lines from bottom-up within the allocated space
-        mvwprintw(win_bottom.win, start_y + (messages_display_height - 1) - count_printed, start_x, "> %s", line);
-        
-        if (i == 0) wattroff(win_bottom.win, A_BOLD);
-        else wattroff(win_bottom.win, A_DIM);
-
-        count_printed++;
-    }
-
-    // Separator line between Log and Tile Info
-    mvwhline(win_bottom.win, start_y + messages_display_height, 1, ACS_HLINE, win_bottom.width - 1);
-
-    // --- SECTION 2: TILE INSPECTION ---
-    Tile *tile = game.looking ? get_looking_tile() : get_tile_under_player();
-    EntitiesIds *entities = game.looking ? get_looking_entities() : get_entities_under_player();
-
-    size_t line = start_y + messages_display_height + 1; // Start below separator
-
-    wmove(win_bottom.win, line++, start_x);
-    switch (tile->type)
-    {
-    case TILE_FLOOR: wprintw(win_bottom.win, "Floor."); break;
-    case TILE_WALL:  wprintw(win_bottom.win, "Wall."); break;
-    case TILE_DOOR:
-        if (tile->open) {
-            wprintw(win_bottom.win, "Open door (leads to room %d).", tile->leads_to >= 0 ? tile->leads_to : -1);
-        } else {
-            wprintw(win_bottom.win, "Closed door (%s).", tile->heavy ? "Heavy" : "Normal");
+            case __tile_types_count:
+            default: break;
         }
-        break;
 
-    case __tile_types_count:
-    default: break;
-    }
+        if (!da_is_empty(entities)) {
+            mvwprintw(win_bottom.win, line++, 0, "Here: ");
+            for (size_t i = 0; i < entities->count; i++) {
+                Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[i]);
+                char entity_marker = (game.show_entities_info.enabled && i == game.show_entities_info.index) ? '+' : '-';
+                if (i > 0) wprintw(win_bottom.win, ", ");
 
-    if (!da_is_empty(entities)) {
-        mvwprintw(win_bottom.win, line++, start_x, "Here: ");
-        for (size_t i = 0; i < entities->count; i++) {
-            Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[i]);
-            char entity_marker = (game.show_entities_info.enabled && i == game.show_entities_info.index) ? '*' : '-';
-            
-            // Comma separation logic
-            if (i > 0) wprintw(win_bottom.win, ", ");
-            
-            wprintw(win_bottom.win, "%c%s (Lvl %zu)", entity_marker, e->name, e->level);
+                wprintw(win_bottom.win, "%c %s (Lvl %zu)", entity_marker, e->name, e->level);
+            }
+        }
+    } else {
+        size_t count_printed = 0;
+        for (size_t i = 0; i < game.messages.count && count_printed < win_bottom.height; i++) {
+            size_t idx = (game.messages.head - 1 - i + MAX_MESSAGES) % MAX_MESSAGES;
+
+            char *line = game.messages.lines[idx];
+            if (!line) continue;
+
+            if (i == 0) wattron(win_bottom.win, A_BOLD);
+            else wattron(win_bottom.win, A_DIM);
+
+            mvwprintw(win_bottom.win, (win_bottom.height - 1) - count_printed, 0, "> %s", line);
+
+            if (i == 0) wattroff(win_bottom.win, A_BOLD);
+            else wattroff(win_bottom.win, A_DIM);
+
+            count_printed++;
         }
     }
 }
@@ -1202,16 +1348,46 @@ void update_window_bottom2(void)
     }
 }
 
+static inline char sign_as_char(int value) { return value >= 0 ? '+' : '-'; }
+
 void show_entity_info(Entity *e)
 {
-    size_t line = 1;
-    mvwprintw(win_right.win, line++, 1, "%s", e->name);
-    mvwprintw(win_right.win, line++, 1, "%s level %zu ", entity_rank_to_string(e->rank), e->level);
-    if (entity_is_player(e)) wprintw(win_right.win, "(%zu exp)", game.data.player.xp);
-    mvwprintw(win_right.win, line++, 1, "Health: %d", e->stats.hp);
-    mvwprintw(win_right.win, line++, 1, "Defense: %d", e->stats.defense);
-    mvwprintw(win_right.win, line++, 1, "Attack: %d (%d%%)", e->stats.attack, e->stats.accuracy);
-    mvwprintw(win_right.win, line++, 1, "Agility: %d", e->stats.agility);
+    mvwprintw(win_right.win, 0, 1, "%s (%s)", e->name, get_entity_type_string(e->type));
+    size_t line = 2;
+    mvwprintw(win_right.win, line++, 1, "Rank: %s level %zu ", entity_rank_to_string(e->rank), e->level);
+    if (entity_is_player(e)) mvwprintw(win_right.win, line, 1, "Exp: %zu", PLAYER->xp);
+    
+    Faction *faction = get_faction_by_id(e->faction, NULL);
+    mvwprintw(win_right.win, line++, 1, "Faction: %s", faction ? faction->name : "none");
+
+    mvwprintw(win_right.win, line++, 1, "Health: ");
+    if (game.showing_tooltips) {
+        int damage = e->base_stats.health + e->extra_stats.health - e->current_health;
+        wprintw(win_right.win, "%d %c %d - %d", e->base_stats.health, sign_as_char(e->extra_stats.health),
+                abs(e->extra_stats.health), damage);
+    }
+    else wprintw(win_right.win, "%d", e->current_health);
+
+    mvwprintw(win_right.win, line++, 1, "Defense: ");
+    if (game.showing_tooltips) wprintw(win_right.win, "%d %c %d", e->base_stats.defense,
+            sign_as_char(e->extra_stats.defense), abs(e->extra_stats.defense));
+    else wprintw(win_right.win, "%d", e->base_stats.defense + e->extra_stats.defense);
+
+    mvwprintw(win_right.win, line++, 1, "Attack: ");
+    if (game.showing_tooltips) wprintw(win_right.win, "%d %c %d", e->base_stats.attack,
+            sign_as_char(e->extra_stats.attack), abs(e->extra_stats.attack));
+    else wprintw(win_right.win, "%d", e->base_stats.attack + e->extra_stats.attack);
+    waddstr(win_right.win, " (");
+    if (game.showing_tooltips) wprintw(win_right.win, "%d%% %c %d%%", e->base_stats.accuracy,
+            sign_as_char(e->extra_stats.accuracy), abs(e->extra_stats.accuracy));
+    else wprintw(win_right.win, "%d%%", e->base_stats.accuracy + e->extra_stats.accuracy);
+    waddch(win_right.win, ')');
+
+    mvwprintw(win_right.win, line++, 1, "Agility: ");
+    if (game.showing_tooltips) wprintw(win_right.win, "%d %c %d", e->base_stats.agility,
+            sign_as_char(e->extra_stats.agility), abs(e->extra_stats.agility));
+    else wprintw(win_right.win, "%d", e->base_stats.agility + e->extra_stats.agility);
+
     mvwprintw(win_right.win, line++, 1, "Effects: ");
     if (da_is_empty(&e->effects)) {
         waddstr(win_right.win, "none");
@@ -1221,6 +1397,36 @@ void show_entity_info(Entity *e)
             mvwprintw(win_right.win, line++, 1, "- %s", effect_definition->name);
         }
     }
+
+    mvwprintw(win_right.win, line++, 1, "Equipment: ");
+    if (da_is_empty(&e->equipment)) {
+        waddstr(win_right.win, "none");
+    } else {
+        da_foreach(e->equipment, ItemSlot, item_slot) {
+            mvwprintw(win_right.win, line++, 1, "- %s (%s)", item_slot->item.name,
+                    get_item_type_string(item_slot->type));
+        }
+    }
+
+    switch (e->type)
+    {
+    case ENTITY_PLAYER:
+        mvwprintw(win_right.win, line++, 1, "Inventory: ");
+        if (da_is_empty(&e->inventory)) {
+            waddstr(win_right.win, "empty");
+        } else {
+            da_foreach(e->inventory, Item, item) {
+                mvwprintw(win_right.win, line++, 1, "- %s (%s)", item->name, get_item_type_string(item->type));
+            }
+        }
+        break;
+
+    case ENTITY_GENERIC: break;
+
+    case __entity_types_count:
+    default:
+        print_error_and_exit("Unreachable entity type %u in show_entity_info", e->type);
+    }
 }
 
 #define SECONDS_IN_DAY    (60*60*24)
@@ -1228,10 +1434,10 @@ void show_entity_info(Entity *e)
 #define SECONDS_IN_MINUTE (60)
 void update_window_right(void)
 {
-    box(win_right.win, 0, 0);
+    wborder(win_right.win, ACS_VLINE, ' ', ' ', ACS_HLINE, ACS_VLINE, ' ', 0, ACS_HLINE);
 
     if (game.showing_general_info) {
-        size_t line = 1;
+        size_t line = 0;
         mvwprintw(win_right.win, line++, 1, "Seed: %016llx", (unsigned long long)game.data.rng_seed);
 
         mvwprintw(win_right.win, line++, 1, "Total time: ");
@@ -1247,9 +1453,16 @@ void update_window_right(void)
         wprintw(win_right.win, "%lud %luh %lum %lus", time_days, time_hours, time_minutes, time_seconds);
 
     } else if (game.show_entities_info.enabled) {
-        show_entity_info(&CURRENT_ROOM->entities.items[game.show_entities_info.entities->items[game.show_entities_info.index]]);
+        uint64_t id = game.show_entities_info.entities->items[game.show_entities_info.index];
+        Entity *entity = get_entity_by_id(CURRENT_ROOM, id);
+        if (entity) show_entity_info(entity);
+    } else if (game.showing_help) {
+        size_t line = 0;
+        mvwprintw(win_right.win, line++, 1, "Entity Ranks:");
+        for (EntityRank rank = 0; rank < __entity_ranks_count; rank++)
+            mvwprintw(win_right.win, line++, 1, " %c    %s", get_entity_char(rank), entity_rank_to_string(rank));
     } else {
-        show_entity_info(&game.data.player);
+        show_entity_info(PLAYER);
     }
 }
 
@@ -1375,7 +1588,7 @@ void save_stats(FILE *f, Stats *stats)
 {
     fwrite(&stats->attack, sizeof(int), 1, f);
     fwrite(&stats->accuracy, sizeof(int), 1, f);
-    fwrite(&stats->hp, sizeof(int), 1, f);
+    fwrite(&stats->health, sizeof(int), 1, f);
     fwrite(&stats->defense, sizeof(int), 1, f);
     fwrite(&stats->agility, sizeof(int), 1, f);
 }
@@ -1383,9 +1596,21 @@ bool load_stats(FILE *f, Stats *stats)
 {
     if (fread(&stats->attack, sizeof(int), 1, f) != 1) return false;
     if (fread(&stats->accuracy, sizeof(int), 1, f) != 1) return false;
-    if (fread(&stats->hp, sizeof(int), 1, f) != 1) return false;
+    if (fread(&stats->health, sizeof(int), 1, f) != 1) return false;
     if (fread(&stats->defense, sizeof(int), 1, f) != 1) return false;
     if (fread(&stats->agility, sizeof(int), 1, f) != 1) return false;
+    return true;
+}
+
+void save_vector(FILE *f, V2i *v)
+{
+    fwrite(&v->x, sizeof(int), 1, f);
+    fwrite(&v->y, sizeof(int), 1, f);
+}
+bool load_vector(FILE *f, V2i *v)
+{
+    if (fread(&v->x, sizeof(int), 1, f) != 1) return false;
+    if (fread(&v->y, sizeof(int), 1, f) != 1) return false;
     return true;
 }
 
@@ -1393,16 +1618,20 @@ void save_item(FILE *f, Item *item)
 {
     fwrite(&item->type, sizeof(ItemType), 1, f);
     fwrite(item->name, sizeof(item->name), 1, f);
+    save_vector(f, &item->pos);
     fwrite(&item->durability, sizeof(int), 1, f);
     save_stats(f, &item->stats);
+    fwrite(&item->picked_up, sizeof(bool), 1, f);
     save_da(item->effects, save_effect, f); 
 }
 bool load_item(FILE *f, Item *item)
 {
     if (fread(&item->type, sizeof(ItemType), 1, f) != 1) goto fail;
     if (fread(item->name, sizeof(item->name), 1, f) != 1) goto fail;
+    if (!load_vector(f, &item->pos)) goto fail;
     if (fread(&item->durability, sizeof(int), 1, f) != 1) goto fail;
     if (!load_stats(f, &item->stats)) goto fail;
+    if (fread(&item->picked_up, sizeof(bool), 1, f) != 1) goto fail;
     load_da(&item->effects, load_effect, f); 
     return true;
 fail:
@@ -1418,18 +1647,6 @@ bool load_item_slot(FILE *f, ItemSlot *slot)
 {
     if (fread(&slot->type, sizeof(ItemType), 1, f) != 1) return false;
     if (!load_item(f, &slot->item)) return false;
-    return true;
-}
-
-void save_vector(FILE *f, V2i *v)
-{
-    fwrite(&v->x, sizeof(int), 1, f);
-    fwrite(&v->y, sizeof(int), 1, f);
-}
-bool load_vector(FILE *f, V2i *v)
-{
-    if (fread(&v->x, sizeof(int), 1, f) != 1) return false;
-    if (fread(&v->y, sizeof(int), 1, f) != 1) return false;
     return true;
 }
 
@@ -1460,7 +1677,9 @@ void save_entity(FILE *f, Entity *e)
     fwrite(&e->level, sizeof(size_t), 1, f);
     fwrite(&e->movement_timer, sizeof(float), 1, f);
 
-    save_stats(f, &e->stats);
+    fwrite(&e->current_health, sizeof(int), 1, f);
+    save_stats(f, &e->base_stats);
+    save_stats(f, &e->extra_stats);
     
     save_da(e->equipment, save_item_slot, f);
     save_da(e->effects, save_effect, f);
@@ -1492,7 +1711,11 @@ bool load_entity(FILE  *f, Entity *e)
     if (fread(&e->rank, sizeof(EntityRank), 1, f) != 1) goto fail;
     if (fread(&e->level, sizeof(size_t), 1, f) != 1) goto fail;
     if (fread(&e->movement_timer, sizeof(float), 1, f) != 1) goto fail;
-    if (!load_stats(f, &e->stats)) goto fail;
+
+    if (fread(&e->current_health, sizeof(int), 1, f) != 1) goto fail;
+    if (!load_stats(f, &e->base_stats)) goto fail;
+    if (!load_stats(f, &e->extra_stats)) goto fail;
+
     load_da(&e->equipment, load_item_slot, f);
     load_da(&e->effects, load_effect, f);
 
@@ -1571,8 +1794,9 @@ void save_room(FILE *f, Room *room)
         save_tile(f, &room->tilemap.tiles[i]);
 
     save_da(room->entities, save_entity, f);
+    save_da(room->items, save_item, f);
 
-    // NOTE: no need to save entities_map
+    // NOTE: no need to save entities_map and items_map
 }
 bool load_room(FILE *f, Room *room)
 {
@@ -1587,11 +1811,17 @@ bool load_room(FILE *f, Room *room)
     for (size_t i = 0; i < count; i++)
         if (!load_tile(f, room->tilemap.tiles + i)) goto fail;
 
-    load_da(&room->entities, load_entity, f);
 
+    load_da(&room->entities, load_entity, f);
     room->entities_map = malloc(sizeof(EntitiesIds)*count);
     if (!room->entities_map) goto fail;
     memset(room->entities_map, 0, sizeof(EntitiesIds)*count);
+
+
+    load_da(&room->items, load_item, f);
+    room->items_map = malloc(sizeof(ItemsIndices)*count);
+    if (!room->items_map) goto fail;
+    memset(room->items_map, 0, sizeof(ItemsIndices)*count);
 
     return true;
 fail:
@@ -1650,14 +1880,15 @@ void init_game_data(void)
         .rank = RANK_CIVILIAN,
         .level = 1,
 
-        .stats = (Stats) {
-            .hp       = 100,
+        .base_stats = (Stats) {
+            .health   = 100,
             .defense  = 5,
             .accuracy = 75,
             .attack   = 10,
             .agility  = 75
         }
     };
+    player.current_health = player.base_stats.health;
     memcpy(player.name, "Adventurer", 10);
 
     Room *initial_room = generate_room(win_main.width, win_main.height);
@@ -1919,10 +2150,12 @@ void entity_die(Entity *entity, DeathCause cause, ...)
                                           // (that could be "safer", less to no monsters, some way to heal...)
 
         PLAYER->pos = (V2i){1, 1}; // just to see something
-        PLAYER->stats.hp = 100*PLAYER->level; // TODO okaye, I got it:
-                                                            // levels give base stats and items add them up
-                                                            // so, now I just have to calculate what is the base hp
-                                                            // for the level;
+        PLAYER->current_health = 100*PLAYER->level; // TODO okaye, I got it:
+                                                   //      levels give base stats and items add them up
+                                                   //      so, now I just have to calculate what is the base health
+                                                   //      for the level;
+        PLAYER->extra_stats = (Stats){0};
+        // TODO: recalculate extra stats based on kept equipment/powers
         PLAYER->faction = NO_FACTION;
     } else {
         entity->dead = true;
@@ -1974,28 +2207,43 @@ EntityStatus apply_entity_effects(Entity *entity)
 }
 static inline EntityStatus apply_player_effects(void) { return apply_entity_effects(PLAYER); }
 
+const char *damage_strings[] = {
+    "ouch",
+    "ugh",
+    "waaah",
+};
+const size_t damage_strings_count = sizeof(damage_strings)/sizeof(*damage_strings);
+static inline const char *get_random_damage_string(void)
+{
+    return damage_strings[combat_rng_generate() % damage_strings_count];
+}
+
+static inline Stats entity_get_stats_sum(Entity *e) { return stats_sum(e->base_stats, e->extra_stats); }
+
 EntityStatus entity_attack_entity(Entity *attacker, Entity *defender)
 {
     write_message("%s is attacking %s", attacker->name, defender->name);
-    if (attacker->stats.accuracy <= 0) {
+    Stats attacker_stats = entity_get_stats_sum(attacker);
+    Stats defender_stats = entity_get_stats_sum(defender);
+    if (attacker_stats.accuracy <= 0) {
         write_message("%s missed the attack, didn't even try", attacker->name);
         return ESTATUS_OK;
     }
-    int multiplier = attacker->stats.accuracy / 100;
-    uint64_t accuracy = attacker->stats.accuracy % 100;
+    int multiplier = attacker_stats.accuracy / 100;
+    uint64_t accuracy = attacker_stats.accuracy % 100;
     if (accuracy > 0 && (combat_rng_generate() % 100) >= accuracy) multiplier += 1;
     if (multiplier <= 0) {
         write_message("%s missed the attack, unlucky", attacker->name);
         return ESTATUS_OK;
     }
-    int damage = attacker->stats.attack*multiplier;
-    int total_damage = damage - defender->stats.defense;
+    int damage = attacker_stats.attack*multiplier;
+    int total_damage = damage - defender_stats.defense;
     if (total_damage <= 0) {
         write_message("%s defended %d damage, unbothered", defender->name, damage);
         return ESTATUS_OK;
     }
-    write_message("%s inflicted %u damage, ouch", attacker->name, total_damage);
-    defender->stats.hp -= total_damage;
+    write_message("%s inflicted %u damage, %s", attacker->name, total_damage, get_random_damage_string());
+    defender->current_health -= total_damage;
     if (entity_is_dead(defender)) {
         entity_die_from_entity_attack(defender, attacker);    
         return ESTATUS_DEAD;
@@ -2110,7 +2358,10 @@ void entity_interact_with_entities(Entity *entity, EntitiesIds *entities)
 
         if (apply_entity_effects(other) == ESTATUS_DEAD) continue;
 
-        if (entity->stats.agility >= other->stats.agility) {
+        Stats entity_stats = entity_get_stats_sum(entity);
+        Stats other_stats = entity_get_stats_sum(other);
+
+        if (entity_stats.agility >= other_stats.agility) {
             if (entity_attack_entity(entity, other) == ESTATUS_DEAD) continue;
             if (entity_attack_entity(other, entity) == ESTATUS_DEAD) return;
         } else {
@@ -2151,7 +2402,10 @@ void player_interact_with_entities(EntitiesIds *entities)
 
         if (apply_entity_effects(entity) == ESTATUS_DEAD) continue;
 
-        if (PLAYER->stats.agility >= entity->stats.agility) {
+        Stats player_stats = entity_get_stats_sum(PLAYER);
+        Stats entity_stats = entity_get_stats_sum(entity);
+
+        if (player_stats.agility >= entity_stats.agility) {
             if (player_attack_entity(entity) == ESTATUS_DEAD) continue;
             if (entity_attack_player(entity) == ESTATUS_DEAD) return;
         } else {
@@ -2161,10 +2415,21 @@ void player_interact_with_entities(EntitiesIds *entities)
     }
 }
 
+void player_pickup_items(ItemsIndices *items_indices)
+{
+    for (size_t i = 0; i < items_indices->count; i++) {
+        Item *item = &CURRENT_ROOM->items.items[items_indices->items[i]];
+        Item inventory_item = *item;
+        da_push(&PLAYER->inventory, inventory_item);
+        item->picked_up = true;
+        write_message("Picked up %s", inventory_item.name);
+    }
+}
+
 static_assert(__tile_types_count == 3, "Move player onto all tiles");
 static inline void move_player(Direction direction)
 {
-    game.data.player.direction = direction;
+    PLAYER->direction = direction;
     if (!entity_can_move(&game.data.player)) return;
     V2i *curr_pos = &PLAYER->pos;
     V2i dir = direction_vector(direction);
@@ -2174,19 +2439,23 @@ static inline void move_player(Direction direction)
 
     EntitiesIds *entities = entities_at(CURRENT_ROOM, new_pos.x, new_pos.y);
 
-    if (da_is_empty(entities)) {
+    ItemsIndices *items = items_at(CURRENT_ROOM, new_pos.x, new_pos.y);
+    (void)items; // TODO: move and pick up item
+
+    if (!da_is_empty(entities)) player_interact_with_entities(entities);
+    else if (!da_is_empty(items)) {
+        player_pickup_items(items);
+        *curr_pos = new_pos;
+    } else {
         if (tile->type == TILE_DOOR) player_interact_with_door(tile);
         else if (tile->type == TILE_FLOOR) *curr_pos = new_pos;
-    } else player_interact_with_entities(entities);
+    }
 }
 
 // TODO: non funziona :)
 void check_player_look_direction(void)
 {
-    V2i pos = game.data.player.pos;
-    V2i dir = direction_vector(game.data.player.direction);
-    EntitiesIds *entities = entities_at(CURRENT_ROOM, pos.x + dir.x, pos.y + dir.y);
-    // TODO: show options, but for now:
+    EntitiesIds *entities = get_looking_entities();
     if (!da_is_empty(entities)) {
         if (!game.show_entities_info.enabled) {
             game.show_entities_info.enabled = true;
@@ -2238,12 +2507,17 @@ void process_pressed_key(void)
 
         case CTRL('I'):
             game.showing_general_info = !game.showing_general_info;
+            game.showing_help = false;
+            game.show_entities_info.enabled = false;
             break;
 
-        case CTRL_ALT_E:
-            // TODO: I have to free all the entities
-            write_message("TODO: clear all entities");
+        case CTRL('H'):
+            game.showing_help = !game.showing_help;
+            game.showing_general_info = false;
+            game.show_entities_info.enabled = false;
             break;
+
+        case ENTER: check_player_look_direction(); break;
 
         case 'l': game.looking = !game.looking; break;
 
@@ -2260,6 +2534,12 @@ void process_pressed_key(void)
                 game.show_entities_info.enabled = false;
                 game.show_entities_info.index = 0;
             }
+            break;
+
+        case 't':
+        case KEY_SRIGHT:
+            game.showing_tooltips = !game.showing_tooltips;
+            write_message("Show tooltips");
             break;
 
         //case ALT_0:
@@ -2324,6 +2604,25 @@ void clear_and_populate_entities_map(void)
     }
 }
 
+void clear_and_populate_items_map(void)
+{
+    for (size_t i = 0; i < room_tiles_count(CURRENT_ROOM); i++)
+        da_clear(&CURRENT_ROOM->items_map[i]);
+
+    size_t i = 0;
+    while (i < CURRENT_ROOM->items.count) {
+        Item *item = &CURRENT_ROOM->items.items[i];
+        if (item->picked_up) {
+            // TODO: free item fields
+            da_remove(&CURRENT_ROOM->items, i);
+        } else {
+            size_t index = index_in_room(CURRENT_ROOM, item->pos.x, item->pos.y);
+            da_push(&CURRENT_ROOM->items_map[index], i);
+            i++;
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -2353,6 +2652,7 @@ int main(int argc, char **argv)
         advance_all_timers(dt);
 
         clear_and_populate_entities_map();
+        clear_and_populate_items_map();
 
         napms(16); // TODO: do it with the calculated dt
     }
