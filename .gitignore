@@ -1,5 +1,6 @@
-roguelike
-clang_roguelike
 log.txt
 from_gemini/
 save.bin
+build/
+nob
+nob.old

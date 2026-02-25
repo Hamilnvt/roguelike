@@ -10,24 +10,17 @@
  *          > downrank it
  * 
  * TODO
- * - basic interactions
- *   > monster: attack (one from the player and one from the monster)
- *   > door: go to room
- *   - an interaction happens when the player tries to move onto the tile
- *   - possibility to just "look" at a tile to gather information
+ * - camera: it follows the player so that the room can be larger
+ * - make it turn-based? (makes it easier to apply effects and many other things)
+ *   > or maybe not, just keep timers in seconds, feels more natural
  * - maybe if an entity spawns on top of another entity it triggers some event:
  *   > on player: ambush
  *   > on another entity: combat
  * - when hovering on entities pressing 'i' shows their stats in the right window
- * - since now entities can stack, there's no need to check if two of them "collide" they are just put in the same tile
  * - monsters drop key to open doors
- *   > heavy doors can be opened by defeating a King in the room and lead to special rooms (?)
- * - inventory to store/equip items
+ *   > heavy doors can be opened by defeating a King (or higher) in the room and lead to special rooms (?)
  * - each step increments a "timer" and after some time some actions are performed (a monster moves, a new monster spawns, something good/bad happens)
- * - clear entities_map at the end of the iteration and repopulate it at the beginning?
  * - monsters in a new room spawn accordingly to player's level
- * - cycle char shown if more than one entity/item on a tile
- * - items + items_map like for entities? They can stay on the ground but they're not tiles nor entities
  * - think about the level
  *   > what does it give to the entity? Does it boosts its stats in some way?
  *   > It can be the lower value for the spawned entities
@@ -58,6 +51,7 @@
 #include "strings.h"
 
 #define DEBUG true
+#define UNUSED(x) (void)(x)
 
 static inline bool streq(const char *s1, const char *s2) { return strcmp(s1, s2) == 0; }
 static inline bool strneq(const char *s1, const char *s2, size_t n) { return strncmp(s1, s2, n) == 0; }
@@ -132,6 +126,14 @@ uint64_t rng_generate(RNG *rng)
     return result;
 }
 
+static inline double rng_generate_double(RNG *rng) { return rng_generate(rng) / ((double)UINT64_MAX + 1.0); }
+static inline bool rng_bernoulli(RNG *rng, double p) { return rng_generate_double(rng) < p; }
+
+#define ROOMS_RNG    (&game.data.rooms_rng)
+#define ENTITIES_RNG (&game.data.entities_rng)
+#define ITEMS_RNG    (&game.data.items_rng)
+#define COMBAT_RNG   (&game.data.combat_rng)
+
 typedef struct
 {
     int x;
@@ -186,13 +188,6 @@ typedef struct
        };
     };
 } Tile;
-
-typedef struct
-{
-    size_t width;
-    size_t height;
-    Tile *tiles;
-} TileMap;
 
 typedef enum
 {
@@ -318,12 +313,11 @@ typedef struct
     size_t capacity;
 } ItemsIndices;
 
-static inline uint64_t items_rng_generate(void);
 Item make_item_random_of_type(ItemType type)
 {
     Item item = {
         .type = type,
-        .durability = items_rng_generate() % 100
+        .durability = rng_generate(ITEMS_RNG) % 100
     };
 
     String item_name = {0};
@@ -355,27 +349,28 @@ Item make_item_random_of_type(ItemType type)
 
     // TODO: for now
     item.stats = (Stats) {
-        .attack   = items_rng_generate() % 100,
-        .accuracy = items_rng_generate() % 100,
-        .health   = items_rng_generate() % 200,
-        .defense  = items_rng_generate() % 100,
-        .agility  = items_rng_generate() % 100,
+        .attack   = rng_generate(ITEMS_RNG) % 100,
+        .accuracy = rng_generate(ITEMS_RNG) % 100,
+        .health   = rng_generate(ITEMS_RNG) % 200,
+        .defense  = rng_generate(ITEMS_RNG) % 100,
+        .agility  = rng_generate(ITEMS_RNG) % 100,
     };
 
     return item;
 }
 
 static inline Item make_item_random(void)
-{ return make_item_random_of_type(items_rng_generate() % __item_types_count); }
+{ return make_item_random_of_type(rng_generate(ITEMS_RNG) % __item_types_count); }
 
 typedef struct
 {
     ItemType type;
+    bool occupied;
     Item item;
 } ItemSlot;
 
 static inline ItemSlot make_item_slot_random(void)
-{ return (ItemSlot){ .type = items_rng_generate() % __item_types_count }; }
+{ return (ItemSlot){ .type = rng_generate(ITEMS_RNG) % __item_types_count }; }
 
 typedef struct
 {
@@ -477,7 +472,6 @@ typedef struct
 
 typedef Power Powers[__power_types_count]; // TODO
 
-// TODO:
 #define ENTITY_NAME_MAX_LEN 31
 typedef struct Entity
 {
@@ -566,7 +560,9 @@ char *tile_type_to_string(TileType type)
 typedef struct Room
 {
     size_t index;
-    TileMap tilemap;
+    size_t width;
+    size_t height;
+    Tile *tiles;
     Entities entities;
     EntitiesIds *entities_map;
     Items items;
@@ -580,12 +576,12 @@ typedef struct
     size_t capacity;
 } Rooms;
 
-static inline size_t index_in_room(Room *room, size_t x, size_t y) { return y*room->tilemap.width + x; }
+static inline size_t index_in_room(Room *room, size_t x, size_t y) { return y*room->width + x; }
 static inline V2i pos_in_room(Room *room, size_t i)
-{ return (V2i){i%room->tilemap.width, (size_t)(i/room->tilemap.height)}; }
+{ return (V2i){i%room->width, (size_t)(i/room->height)}; }
 static inline Tile *tile_at(Room *room, size_t x, size_t y)
-{ return &room->tilemap.tiles[index_at(x, y, room->tilemap.width)]; }
-static inline size_t room_tiles_count(Room *room) { return room->tilemap.width*room->tilemap.height; }
+{ return &room->tiles[index_at(x, y, room->width)]; }
+static inline size_t room_tiles_count(Room *room) { return room->width*room->height; }
 static inline EntitiesIds *entities_at(Room *room, size_t x, size_t y) 
 { return &room->entities_map[index_in_room(room, x, y)]; }
 static inline ItemsIndices *items_at(Room *room, size_t x, size_t y) 
@@ -612,6 +608,8 @@ typedef struct
 {
     Data data;
 
+    V2i camera;
+
     struct {
         char buffer[1024];
         char *lines[MAX_MESSAGES]; 
@@ -619,7 +617,7 @@ typedef struct
         size_t count;
     } messages;
 
-
+    // Timers
     float save_timer;
     float switch_timer;
 
@@ -673,11 +671,6 @@ static inline EntitiesIds *get_looking_entities(void)
     return entities_at(CURRENT_ROOM, pos.x, pos.y);
 }
 
-static inline uint64_t rooms_rng_generate   (void) { return rng_generate(&game.data.rooms_rng); }
-static inline uint64_t entities_rng_generate(void) { return rng_generate(&game.data.entities_rng); }
-static inline uint64_t items_rng_generate   (void) { return rng_generate(&game.data.items_rng); }
-static inline uint64_t combat_rng_generate   (void) { return rng_generate(&game.data.combat_rng); }
-
 void rng_log(RNG rng)
 {
     log_this("RNG seed: %016llx", game.data.rng_seed); 
@@ -700,7 +693,7 @@ static inline void set_tile_wall(Tile *tile, bool destructible)
 
 static inline void set_tile_wall_random(Tile *tile)
 {
-    bool destructible = rooms_rng_generate()%2;
+    bool destructible = rng_generate(ROOMS_RNG)%2;
     set_tile_wall(tile, destructible);
 }
 
@@ -718,8 +711,8 @@ static inline void set_tile_door(Tile *tile, bool open, bool heavy, int leads_to
 
 static inline void set_tile_door_random(Tile *tile)
 {
-    bool open = rooms_rng_generate()%2;
-    bool heavy = open ? false : rooms_rng_generate()%2;
+    bool open = rng_generate(ROOMS_RNG)%2;
+    bool heavy = open ? false : rng_generate(ROOMS_RNG)%2;
     int leads_to = DOOR_LEADS_TO_NEW_ROOM; // TODO
     set_tile_door(tile, open, heavy, leads_to);
 }
@@ -728,7 +721,7 @@ void shuffle_tiles_array(size_t *tiles_indices, size_t tiles_count)
 {
     size_t tmp;
     for (size_t i = tiles_count-1; i >= 1; i--) {
-        size_t j = rooms_rng_generate() % i;
+        size_t j = rng_generate(ROOMS_RNG) % i;
         tmp = tiles_indices[i];
         tiles_indices[i] = tiles_indices[j];
         tiles_indices[j] = tmp;
@@ -739,7 +732,7 @@ void shuffle_entities_array(size_t *entities_indices, size_t entities_count)
 {
     size_t tmp;
     for (size_t i = entities_count-1; i >= 1; i--) {
-        size_t j = entities_rng_generate() % i;
+        size_t j = rng_generate(ENTITIES_RNG) % i;
         tmp = entities_indices[i];
         entities_indices[i] = entities_indices[j];
         entities_indices[j] = tmp;
@@ -759,7 +752,7 @@ Tile *get_random_tile_predicate(Room *room, TilePredicate predicate, void *args)
     Tile *tile = NULL;
     for (size_t i = 0; i < tiles_count; i++) {
         size_t index = tiles_indices[i];
-        Tile *candidate = &room->tilemap.tiles[index];
+        Tile *candidate = &room->tiles[index];
         if (predicate(candidate, args)) {
             tile = candidate;
             break;
@@ -769,10 +762,10 @@ Tile *get_random_tile_predicate(Room *room, TilePredicate predicate, void *args)
     return tile;
 }
 
-bool predicate_tile_all(Tile *tile, void *_args) { (void)tile; (void)_args; return true; }
+bool predicate_tile_all(Tile *tile, void *_args) { UNUSED(tile); UNUSED(_args); return true; }
 static inline Tile *get_random_tile(Room *room) { return get_random_tile_predicate(room, predicate_tile_all, NULL); }
 
-bool predicate_tile_is_floor(Tile *tile, void *_args) { (void)_args; return tile->type == TILE_FLOOR; }
+bool predicate_tile_is_floor(Tile *tile, void *_args) { UNUSED(_args); return tile->type == TILE_FLOOR; }
 static inline Tile *get_random_floor_tile(Room *room)
 {
    return get_random_tile_predicate(room, predicate_tile_is_floor, NULL);
@@ -787,8 +780,8 @@ bool predicate_tile_is_perimeter_wall(Tile *tile, void *_args)
     __TilePredicateArgs_PerimeterWall args = *(__TilePredicateArgs_PerimeterWall *)_args;
     size_t x = tile->pos.x;
     size_t y = tile->pos.y;
-    size_t width = args.room->tilemap.width;
-    size_t height = args.room->tilemap.height;
+    size_t width = args.room->width;
+    size_t height = args.room->height;
 
     bool tile_on_vertical_edge = (y == 0 || y == height-1);
     bool tile_on_horizontal_edge = (x == 0 || x == width-1);
@@ -809,7 +802,7 @@ bool get_random_entity_slot_as_vector(Room *room, V2i *pos)
     //shuffle_entities_array(tiles_indices, tiles_count);
     //Tile *tile = NULL;
     //for (size_t i = 0; i < tiles_count; i++) {
-    //    tile = &room->tilemap.tiles[tiles_indices[i]];
+    //    tile = &room->tiles[tiles_indices[i]];
     //    if (predicate(tile)) break;
     //    else tile = NULL;
     //}
@@ -821,16 +814,16 @@ bool get_random_entity_slot_as_vector(Room *room, V2i *pos)
     size_t x;
     size_t y;
     while (tries > 0) {
-        x = rooms_rng_generate() % (room->tilemap.width-1) + 1;
-        y = rooms_rng_generate() % (room->tilemap.height-1) + 1;
+        x = rng_generate(ROOMS_RNG) % (room->width-1) + 1;
+        y = rng_generate(ROOMS_RNG) % (room->height-1) + 1;
         const Tile *tile = tile_at(room, x, y);
         if (tile->type != TILE_WALL) {
             *pos = (V2i){x, y};
             return true;
         } else tries--;
     }
-    for (size_t y = 1; y < room->tilemap.height-1; y++) {
-        for (size_t x = 1; x < room->tilemap.width-1; x++) {
+    for (size_t y = 1; y < room->height-1; y++) {
+        for (size_t x = 1; x < room->width-1; x++) {
             const Tile *tile = tile_at(room, x, y);
             if (tile->type != TILE_WALL) {
                 *pos = (V2i){x, y};
@@ -867,7 +860,7 @@ static inline void write_string_to_message(String string) { write_message(S_FMT,
 static uint64_t faction_id_count = 1;
 uint64_t get_random_faction_id(void)
 {
-    size_t index = entities_rng_generate() % (game.data.factions.count+1);
+    size_t index = rng_generate(ENTITIES_RNG) % (game.data.factions.count+1);
     if (index == game.data.factions.count) {
         Faction faction = {
             .id = faction_id_count++,
@@ -910,8 +903,10 @@ static inline Stats stats_sum(Stats s1, Stats s2)
 Stats entity_get_extra_stats_from_equipment(Entity *e)
 {
     Stats stats = {0};
-    da_foreach (e->equipment, ItemSlot, item_slot)
+    da_foreach (e->equipment, ItemSlot, item_slot) {
+        if (!item_slot->occupied) continue;
         stats = stats_sum(stats, item_slot->item.stats);     
+    }
     return stats;
 }
 
@@ -923,25 +918,26 @@ Entity make_entity_random_at(size_t x, size_t y)
         .type = ENTITY_GENERIC,
         .faction = get_random_faction_id(),
         .pos = (V2i){x, y},
-        .direction = entities_rng_generate() % __directions_count,
-        .rank      = entities_rng_generate() % __entity_ranks_count,
-        .level     = entities_rng_generate() % (10*(e.rank+1)) + 1,
+        .direction = rng_generate(ENTITIES_RNG) % __directions_count,
+        .rank      = rng_generate(ENTITIES_RNG) % __entity_ranks_count,
+        .level     = rng_generate(ENTITIES_RNG) % (10*(e.rank+1)) + 1,
         .base_stats = (Stats){
-            .health  = entities_rng_generate() % (100*(e.rank+1)),
-            .defense = entities_rng_generate() % (10*(e.rank+1)),
-            .accuracy = entities_rng_generate() % (100*(e.rank+1)),
-            .attack  = entities_rng_generate() % (100*(e.rank+1)),
-            .agility = entities_rng_generate() % (10*(e.rank+1))
+            .health  = rng_generate(ENTITIES_RNG) % (100*(e.rank+1)),
+            .defense = rng_generate(ENTITIES_RNG) % (10*(e.rank+1)),
+            .accuracy = rng_generate(ENTITIES_RNG) % (100*(e.rank+1)),
+            .attack  = rng_generate(ENTITIES_RNG) % (100*(e.rank+1)),
+            .agility = rng_generate(ENTITIES_RNG) % (10*(e.rank+1))
         },
-        .movement_timer = entities_rng_generate() % 10 + 2
+        .movement_timer = rng_generate(ENTITIES_RNG) % 10 + 2
     };
 
-    size_t items_count = entities_rng_generate() % (e.rank+1);
+    size_t items_count = rng_generate(ENTITIES_RNG) % (e.rank+1);
     for (size_t i = 0; i < items_count; i++) {
         ItemSlot item_slot = make_item_slot_random();
         Item item = make_item_random_of_type(item_slot.type);
         item.picked_up = true;
         item_slot.item = item;
+        item_slot.occupied = true;
         da_push(&e.equipment, item_slot);
     }
 
@@ -966,8 +962,8 @@ Entity *get_entity_by_id(Room *room, uint64_t id)
 
 static inline Entity make_entity_random(size_t x_low, size_t x_high, size_t y_low, size_t y_high)
 {
-    size_t x = (entities_rng_generate() % (x_high - x_low)) + x_low;
-    size_t y = (entities_rng_generate() % (y_high - y_low)) + y_low;
+    size_t x = (rng_generate(ENTITIES_RNG) % (x_high - x_low)) + x_low;
+    size_t y = (rng_generate(ENTITIES_RNG) % (y_high - y_low)) + y_low;
     return make_entity_random_at(x, y);
 }
 
@@ -1005,11 +1001,9 @@ Room *generate_room(size_t width, size_t height) // TODO: add a from Room to ens
                                                  //       that leads to the previous room (except for the initial room)
 {
     Room room = {
-        .tilemap = (TileMap){
-            .width = width,
-            .height = height,
-            .tiles = create_tiles(width, height)
-        },
+        .width = width,
+        .height = height,
+        .tiles = create_tiles(width, height),
         .entities = (Entities){0},
         .entities_map = malloc(sizeof(EntitiesIds)*width*height), // TODO: handle malloc fail
         .items = (Items){0},
@@ -1020,7 +1014,7 @@ Room *generate_room(size_t width, size_t height) // TODO: add a from Room to ens
     for (size_t y = 0; y < height; y++) {
         for (size_t x = 0; x < width; x++) {
             if (x == 0 || y == 0 || x == width-1 || y == height-1) {
-                set_tile_wall(&room.tilemap.tiles[index_at(x, y, width)], !WALL_IS_DESTRUCTIBLE);
+                set_tile_wall(&room.tiles[index_at(x, y, width)], !WALL_IS_DESTRUCTIBLE);
             }
         }
     }
@@ -1028,21 +1022,53 @@ Room *generate_room(size_t width, size_t height) // TODO: add a from Room to ens
     Tile *sure_door = get_random_perimeter_wall(&room);
     set_tile_door(sure_door, DOOR_IS_OPEN, !DOOR_IS_HEAVY, DOOR_LEADS_TO_NEW_ROOM);
 
-    size_t doors_count = rooms_rng_generate() % 3;
+    size_t doors_count = rng_generate(ROOMS_RNG) % 3;
     for (size_t i = 0; i < doors_count; i++) {
         Tile *door = get_random_perimeter_wall(&room);
         set_tile_door_random(door);
     }
 
-    size_t entities_count = (rooms_rng_generate() % 10) + 1;
+    size_t entities_count = (rng_generate(ROOMS_RNG) % 10) + 1;
     for (size_t i = 0; i < entities_count; i++) {
         spawn_random_entity(&room);
     }
 
-    size_t items_count = (rooms_rng_generate() % 3) == 0 ? 1 : 0; // TODO: make a probability function based on rng
+    size_t items_count = (rng_generate(ROOMS_RNG) % 3) == 0 ? 1 : 0; // TODO: make a probability function based on rng
     for (size_t i = 0; i < items_count; i++) {
         spawn_random_item(&room);
     }
+
+    room.index = game.data.rooms.count;
+    da_push(&game.data.rooms, room);
+
+    return &game.data.rooms.items[room.index];
+}
+
+Room *generate_initial_room(void)
+{
+    const size_t width  = 151;
+    const size_t height = 119;
+    Room room = {
+        .width = width,
+        .height = height,
+        .tiles = create_tiles(width, height),
+        .entities = (Entities){0},
+        .entities_map = malloc(sizeof(EntitiesIds)*width*height), // TODO: handle malloc fail
+        .items = (Items){0},
+        .items_map = malloc(sizeof(ItemsIndices)*width*height) // TODO: handle malloc fail
+    };
+
+    // TODO: si puo' migliorare questo loop
+    for (size_t y = 0; y < height; y++) {
+        for (size_t x = 0; x < width; x++) {
+            if (x == 0 || y == 0 || x == width-1 || y == height-1) {
+                set_tile_wall(&room.tiles[index_at(x, y, width)], !WALL_IS_DESTRUCTIBLE);
+            }
+        }
+    }
+
+    Tile *begin_door = tile_at(&room, width/2, 0);
+    set_tile_door(begin_door, DOOR_IS_OPEN, !DOOR_IS_HEAVY, DOOR_LEADS_TO_NEW_ROOM);
 
     room.index = game.data.rooms.count;
     da_push(&game.data.rooms, room);
@@ -1059,8 +1085,8 @@ typedef struct
 } EffectDefinition;
 
 #define UNUSED_EFFECTACTION_PARAMETERS \
-    (void)effect;                      \
-    (void)actor;                       \
+    UNUSED(effect);                    \
+    UNUSED(actor);                     \
 
 void effect_heal(EFFECTACTION_PARAMETERS)
 {
@@ -1206,13 +1232,45 @@ Window create_window(int x, int y, int w, int h, int color_pair, UpdateWindowFun
     return win;
 }
 
+void clamp_camera(void)
+{
+    int max_x = (int)CURRENT_ROOM->width - (int)win_main.width;
+    int max_y = (int)CURRENT_ROOM->height - (int)win_main.height;
+
+    if (max_x < 0) max_x = 0;
+    if (max_y < 0) max_y = 0;
+
+    if (game.camera.x < 0) game.camera.x = 0;
+    if (game.camera.y < 0) game.camera.y = 0;
+
+    if (game.camera.x > max_x) game.camera.x = max_x;
+    if (game.camera.y > max_y) game.camera.y = max_y;
+}
+
+static inline void update_camera(void)
+{
+    game.camera.x = PLAYER->pos.x - (win_main.width / 2);
+    game.camera.y = PLAYER->pos.y - (win_main.height / 2);
+    clamp_camera();
+}
+
 void update_window_main(void)
 {
-    for (size_t y = 0; y < CURRENT_ROOM->tilemap.height; y++) {
-        for (size_t x = 0; x < CURRENT_ROOM->tilemap.width; x++) {
-            const Tile *tile = tile_at(CURRENT_ROOM, x, y);
-            EntitiesIds *entities = entities_at(CURRENT_ROOM, x, y);
-            ItemsIndices *items = items_at(CURRENT_ROOM, x, y);
+    update_camera();
+
+    for (size_t screen_y = 0; screen_y < win_main.height; screen_y++) {
+        for (size_t screen_x = 0; screen_x < win_main.width; screen_x++) {
+            int world_x = game.camera.x + screen_x;
+            int world_y = game.camera.y + screen_y;
+
+            if (world_x >= (int)CURRENT_ROOM->width || world_y >= (int)CURRENT_ROOM->height) {
+                mvwaddch(win_main.win, screen_y, screen_x, ' ');
+                continue;
+            }
+
+            const Tile *tile = tile_at(CURRENT_ROOM, world_x, world_y);
+            EntitiesIds *entities = entities_at(CURRENT_ROOM, world_x, world_y);
+            ItemsIndices *items = items_at(CURRENT_ROOM, world_x, world_y);
 
             char c;
 
@@ -1241,12 +1299,11 @@ void update_window_main(void)
                  else c = get_entity_char(e->rank);
             } else if (!da_is_empty(items)) c = 'i'; 
             else c = get_tile_char(tile);
-            mvwaddch(win_main.win, y, x, c);
+            mvwaddch(win_main.win, screen_y, screen_x, c);
         }
     }
 
-    Entity *pe = PLAYER;
-    mvwaddch(win_main.win, pe->pos.y, pe->pos.x, '@');
+    mvwaddch(win_main.win, PLAYER->pos.y - game.camera.y, PLAYER->pos.x - game.camera.x, '@');
 }
 
 void update_window_bottom(void)
@@ -1362,9 +1419,8 @@ void show_entity_info(Entity *e)
 
     mvwprintw(win_right.win, line++, 1, "Health: ");
     if (game.showing_tooltips) {
-        int damage = e->base_stats.health + e->extra_stats.health - e->current_health;
-        wprintw(win_right.win, "%d %c %d - %d", e->base_stats.health, sign_as_char(e->extra_stats.health),
-                abs(e->extra_stats.health), damage);
+        wprintw(win_right.win, "%d %c %d (max)", e->base_stats.health, sign_as_char(e->extra_stats.health),
+                abs(e->extra_stats.health));
     }
     else wprintw(win_right.win, "%d", e->current_health);
 
@@ -1403,8 +1459,8 @@ void show_entity_info(Entity *e)
         waddstr(win_right.win, "none");
     } else {
         da_foreach(e->equipment, ItemSlot, item_slot) {
-            mvwprintw(win_right.win, line++, 1, "- %s (%s)", item_slot->item.name,
-                    get_item_type_string(item_slot->type));
+            mvwprintw(win_right.win, line++, 1, "- %s (%s)", get_item_type_string(item_slot->type),
+                    item_slot->occupied ? item_slot->item.name : "empty");
         }
     }
 
@@ -1641,11 +1697,13 @@ fail:
 void save_item_slot(FILE *f, ItemSlot *slot)
 {
     fwrite(&slot->type, sizeof(ItemType), 1, f);
+    fwrite(&slot->occupied, sizeof(bool), 1, f);
     save_item(f, &slot->item);
 }
 bool load_item_slot(FILE *f, ItemSlot *slot)
 {
     if (fread(&slot->type, sizeof(ItemType), 1, f) != 1) return false;
+    if (fread(&slot->occupied, sizeof(bool), 1, f) != 1) return false;
     if (!load_item(f, &slot->item)) return false;
     return true;
 }
@@ -1717,6 +1775,8 @@ bool load_entity(FILE  *f, Entity *e)
     if (!load_stats(f, &e->extra_stats)) goto fail;
 
     load_da(&e->equipment, load_item_slot, f);
+    e->extra_stats = entity_get_extra_stats_from_equipment(e);
+
     load_da(&e->effects, load_effect, f);
 
     switch (e->type)
@@ -1788,10 +1848,10 @@ void save_room(FILE *f, Room *room)
 {
     fwrite(&room->index, sizeof(size_t), 1, f);
 
-    fwrite(&room->tilemap.width, sizeof(size_t), 1, f);
-    fwrite(&room->tilemap.height, sizeof(size_t), 1, f);
+    fwrite(&room->width, sizeof(size_t), 1, f);
+    fwrite(&room->height, sizeof(size_t), 1, f);
     for (size_t i = 0; i < room_tiles_count(room); i++)
-        save_tile(f, &room->tilemap.tiles[i]);
+        save_tile(f, &room->tiles[i]);
 
     save_da(room->entities, save_entity, f);
     save_da(room->items, save_item, f);
@@ -1802,21 +1862,19 @@ bool load_room(FILE *f, Room *room)
 {
     if (fread(&room->index, sizeof(size_t), 1, f) != 1) goto fail;
 
-    if (fread(&room->tilemap.width, sizeof(size_t), 1, f) != 1) goto fail;
-    if (fread(&room->tilemap.height, sizeof(size_t), 1, f) != 1) goto fail;
+    if (fread(&room->width, sizeof(size_t), 1, f) != 1) goto fail;
+    if (fread(&room->height, sizeof(size_t), 1, f) != 1) goto fail;
     size_t count = room_tiles_count(room);
     // TODO: I can even avoid to save/load tiles positions, i can recalculate it here
-    room->tilemap.tiles = malloc(sizeof(Tile)*count);
-    if (!room->tilemap.tiles) goto fail;
+    room->tiles = malloc(sizeof(Tile)*count);
+    if (!room->tiles) goto fail;
     for (size_t i = 0; i < count; i++)
-        if (!load_tile(f, room->tilemap.tiles + i)) goto fail;
-
+        if (!load_tile(f, room->tiles + i)) goto fail;
 
     load_da(&room->entities, load_entity, f);
     room->entities_map = malloc(sizeof(EntitiesIds)*count);
     if (!room->entities_map) goto fail;
     memset(room->entities_map, 0, sizeof(EntitiesIds)*count);
-
 
     load_da(&room->items, load_item, f);
     room->items_map = malloc(sizeof(ItemsIndices)*count);
@@ -1888,16 +1946,22 @@ void init_game_data(void)
             .agility  = 75
         }
     };
+    
+    // TODO: maybe let the player choose "a class" from which to start
+    //       and they will have different item slots / initial equipment
+    da_push(&player.equipment, (ItemSlot){.type = ITEM_HELMET });
+    da_push(&player.equipment, (ItemSlot){.type = ITEM_CHESTPLATE });
+    da_push(&player.equipment, (ItemSlot){.type = ITEM_CHAUSSES });
+    da_push(&player.equipment, (ItemSlot){.type = ITEM_SWORD });
+    da_push(&player.equipment, (ItemSlot){.type = ITEM_SHIELD });
+
     player.current_health = player.base_stats.health;
     memcpy(player.name, "Adventurer", 10);
 
-    Room *initial_room = generate_room(win_main.width, win_main.height);
+    Room *initial_room = generate_initial_room();
     game.data.current_room_index = initial_room->index;
 
-    V2i pos;
-    if (!get_random_entity_slot_as_vector(CURRENT_ROOM, &pos))
-        print_error_and_exit("It should never happen");
-    player.pos = pos;
+    player.pos = (V2i){initial_room->width/2, initial_room->height/2};
 
     game.data.player = player;
 }
@@ -2033,7 +2097,7 @@ void update_cursor(void)
 
 void handle_sigwinch(int signo)
 {
-    (void)signo;
+    UNUSED(signo);
     get_terminal_size();
     destroy_windows();
     create_windows();
@@ -2051,7 +2115,7 @@ void game_init()
         write_message("Creating new save file...");
         init_game_data();
         save_game_data();
-    } write_message("Save loaded!");
+    } else write_message("Save loaded!");
 }
 
 static inline void player_killed_entity(Entity *e)
@@ -2215,7 +2279,7 @@ const char *damage_strings[] = {
 const size_t damage_strings_count = sizeof(damage_strings)/sizeof(*damage_strings);
 static inline const char *get_random_damage_string(void)
 {
-    return damage_strings[combat_rng_generate() % damage_strings_count];
+    return damage_strings[rng_generate(COMBAT_RNG) % damage_strings_count];
 }
 
 static inline Stats entity_get_stats_sum(Entity *e) { return stats_sum(e->base_stats, e->extra_stats); }
@@ -2231,7 +2295,7 @@ EntityStatus entity_attack_entity(Entity *attacker, Entity *defender)
     }
     int multiplier = attacker_stats.accuracy / 100;
     uint64_t accuracy = attacker_stats.accuracy % 100;
-    if (accuracy > 0 && (combat_rng_generate() % 100) >= accuracy) multiplier += 1;
+    if (accuracy > 0 && (rng_generate(COMBAT_RNG) % 100) >= accuracy) multiplier += 1;
     if (multiplier <= 0) {
         write_message("%s missed the attack, unlucky", attacker->name);
         return ESTATUS_OK;
@@ -2255,16 +2319,16 @@ bool entity_can_move(Entity *e)
 {
     V2i d = direction_vector(e->direction);
     return (e->pos.x + d.x >= 0
-         && (size_t)e->pos.x + d.x < CURRENT_ROOM->tilemap.width
+         && (size_t)e->pos.x + d.x < CURRENT_ROOM->width
          && e->pos.y + d.y >= 0
-         && (size_t)e->pos.y + d.y < CURRENT_ROOM->tilemap.height
+         && (size_t)e->pos.y + d.y < CURRENT_ROOM->height
          && tile_at(CURRENT_ROOM, e->pos.x + d.x, e->pos.y + d.y)->type != TILE_WALL);
 }
 
 Tile *get_door_that_leads_to(int room_index)
 {
-    for (size_t y = 0; y < CURRENT_ROOM->tilemap.height; y++) {
-        for (size_t x = 0; x < CURRENT_ROOM->tilemap.width; x++) {
+    for (size_t y = 0; y < CURRENT_ROOM->height; y++) {
+        for (size_t x = 0; x < CURRENT_ROOM->width; x++) {
             Tile *tile = tile_at(CURRENT_ROOM, x, y);
             if (tile->type == TILE_DOOR && tile->leads_to == room_index) return tile;
         }
@@ -2278,7 +2342,7 @@ void set_entity_position_and_direction_entering_room(Entity *entity, Room *room,
     Direction direction;
          if (door->pos.x == 0)                              direction = DIRECTION_RIGHT;
     else if (door->pos.y == 0)                              direction = DIRECTION_DOWN;
-    else if ((size_t)door->pos.y == room->tilemap.height-1) direction = DIRECTION_UP;
+    else if ((size_t)door->pos.y == room->height-1) direction = DIRECTION_UP;
     else                                                    direction = DIRECTION_LEFT;
 
     entity->pos = door->pos;
@@ -2323,8 +2387,8 @@ void advance_movement_timers(float dt)
         e->movement_timer -= dt;
         if (e->movement_timer <= 0) {
             move_entity(e);
-            e->movement_timer = entities_rng_generate() % 10 + 2;
-            e->direction = entities_rng_generate() % __directions_count;
+            e->movement_timer = rng_generate(ENTITIES_RNG) % 10 + 2;
+            e->direction = rng_generate(ENTITIES_RNG) % __directions_count;
         }
     }
 }
@@ -2440,7 +2504,6 @@ static inline void move_player(Direction direction)
     EntitiesIds *entities = entities_at(CURRENT_ROOM, new_pos.x, new_pos.y);
 
     ItemsIndices *items = items_at(CURRENT_ROOM, new_pos.x, new_pos.y);
-    (void)items; // TODO: move and pick up item
 
     if (!da_is_empty(entities)) player_interact_with_entities(entities);
     else if (!da_is_empty(items)) {
@@ -2480,6 +2543,24 @@ _Noreturn void quit(void)
     exit(0);
 }
 
+void player_equip_all(void)
+{
+    da_foreach (PLAYER->equipment, ItemSlot, slot) {
+        if (slot->occupied) continue;
+        size_t i = 0;
+        while (i < PLAYER->inventory.count) {
+            Item *item = &PLAYER->inventory.items[i];
+            if (item->type == slot->type) {
+                slot->item = *item;
+                slot->occupied = true;
+                da_remove(&PLAYER->inventory, i);
+            } else i++;
+        }
+    }
+    // TODO: be careful because maybe some other things will give extra stats, not just items and this overwrites all
+    PLAYER->extra_stats = entity_get_extra_stats_from_equipment(PLAYER);
+}
+
 void process_pressed_key(void)
 {
     int key = read_key();
@@ -2500,6 +2581,10 @@ void process_pressed_key(void)
 
         case 'd':
         case KEY_RIGHT: move_player(DIRECTION_RIGHT); break;
+
+        case 'e':
+            player_equip_all();
+            break;
 
         case CTRL('E'):
             spawn_random_entity(CURRENT_ROOM);
@@ -2625,8 +2710,8 @@ void clear_and_populate_items_map(void)
 
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    UNUSED(argc);
+    UNUSED(argv);
 
     signal(SIGWINCH, handle_sigwinch);
     ncurses_init();
@@ -2654,7 +2739,7 @@ int main(int argc, char **argv)
         clear_and_populate_entities_map();
         clear_and_populate_items_map();
 
-        napms(16); // TODO: do it with the calculated dt
+        napms(16); // TODO: fix FPS with the calculated dt
     }
 
     return 0;
