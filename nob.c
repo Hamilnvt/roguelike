@@ -87,15 +87,20 @@ bool run(void)
     return cmd_run(&cmd);
 }
 
-bool delete_file(Nob_Walk_Entry entry);
-
 bool clean(void)
 {
-    Nob_File_Paths build_files = {0}
+    Nob_File_Paths build_files = {0};
     if (!nob_read_entire_dir(BUILD_DIR, &build_files)) return false;
-    da_foreach (const char *, file, &build_files) {
-        if (!delete_file(*file)) return false;
+    if (build_files.count == 2) {
+        nob_log(INFO, "build folder is empty");
+        return true;
     }
+    for (size_t i = 0; i < build_files.count; i++) {
+        const char *file = build_files.items[i];
+        if (streq(file, ".") || streq(file, "..")) continue;
+        if (!delete_file(temp_sprintf(BUILD_DIR"/%s", file))) return false;
+    }
+
     return true;
 }
 
