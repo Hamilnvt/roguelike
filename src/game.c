@@ -111,6 +111,11 @@ void process_pressed_key(void)
 
         case 'l': game.looking = !game.looking; break;
 
+        case 'M': game.map.enabled = !game.map.enabled; break;
+        case 'm':
+            game.map.state = (game.map.state + 1) % __map_states_count;
+            break;
+
         case CTRL('S'): save_data(); break;
 
         case 'q': quit();

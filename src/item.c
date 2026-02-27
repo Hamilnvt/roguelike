@@ -1,58 +1,71 @@
 #include "game.h"
 
-const char *item_type_to_string(ItemType type)
+const char *equipment_type_to_string(EquipmentType type)
 {
     switch (type)
     {
-    case ITEM_HELMET:     return "Helmet";
-    case ITEM_HAT:        return "Hat";
-    case ITEM_GOGGLES:    return "Goggles";
-    case ITEM_SCARF:      return "Scarf";
-    case ITEM_CHESTPLATE: return "Chestplate";
-    case ITEM_CHAUSSES:   return "Chausses";
-    case ITEM_SHOE:       return "Shoe";
-    case ITEM_GLOVE:      return "Glove";
-    case ITEM_SWORD:      return "Sword";
-    case ITEM_SHIELD:     return "Shield";
-    case ITEM_SCROLL:     return "Scroll";
-    case ITEM_STAFF:      return "Staff";
+    case EQUIPMENT_HELMET:     return "Helmet";
+    case EQUIPMENT_HAT:        return "Hat";
+    case EQUIPMENT_GOGGLES:    return "Goggles";
+    case EQUIPMENT_SCARF:      return "Scarf";
+    case EQUIPMENT_CHESTPLATE: return "Chestplate";
+    case EQUIPMENT_CHAUSSES:   return "Chausses";
+    case EQUIPMENT_SHOE:       return "Shoe";
+    case EQUIPMENT_GLOVE:      return "Glove";
+    case EQUIPMENT_SWORD:      return "Sword";
+    case EQUIPMENT_SHIELD:     return "Shield";
+    case EQUIPMENT_SCROLL:     return "Scroll";
+    case EQUIPMENT_STAFF:      return "Staff";
 
-    case __item_types_count:
+    case __equipment_types_count:
     default:
-        print_error_and_exit("Unreachable item type %u in item_type_to_string", type);
+        print_error_and_exit("Unreachable item type %u in equipment_type_to_string", type);
     }
 }
 
-Item make_item_random_of_type(ItemType type)
+const char *collectible_type_to_string(CollectibleType type)
+{
+    switch (type)
+    {
+    case COLLECTIBLE_SIMPLE_KEY:  return "Simple Key";
+    case COLLECTIBLE_SPECIAL_KEY: return "Special Key";
+    case __collectible_types_count:
+    default:
+        print_error_and_exit("Unreachable collectible type %u in collectible_type_to_string", type);
+    }
+}
+
+Item make_item_equipment_random_of_type(EquipmentType type)
 {
     Item item = {
-        .type = type,
+        .kind = ITEM_EQUIPMENT,
+        .equipment_type = type,
         .durability = rng_generate(ITEMS_RNG) % 100
     };
 
     String item_name = {0};
     static size_t item_number = 1;
-    s_push_fstr(&item_name, "%s %zu", item_type_to_string(type), item_number);
+    s_push_fstr(&item_name, "%s %zu", equipment_type_to_string(type), item_number);
     strncpy(item.name, item_name.items, item_name.count);
     s_free(&item_name);
 
     switch (type)
     {
-    case ITEM_HELMET:
-    case ITEM_HAT:        
-    case ITEM_GOGGLES:   
-    case ITEM_SCARF:      
-    case ITEM_CHESTPLATE: 
-    case ITEM_CHAUSSES:
-    case ITEM_SHOE:       
-    case ITEM_GLOVE:      
-    case ITEM_SWORD:      
-    case ITEM_SHIELD:     
-    case ITEM_SCROLL:     
-    case ITEM_STAFF:      
+    case EQUIPMENT_HELMET:
+    case EQUIPMENT_HAT:        
+    case EQUIPMENT_GOGGLES:   
+    case EQUIPMENT_SCARF:      
+    case EQUIPMENT_CHESTPLATE: 
+    case EQUIPMENT_CHAUSSES:
+    case EQUIPMENT_SHOE:       
+    case EQUIPMENT_GLOVE:      
+    case EQUIPMENT_SWORD:      
+    case EQUIPMENT_SHIELD:     
+    case EQUIPMENT_SCROLL:     
+    case EQUIPMENT_STAFF:      
         break; // TODO: each item type gives different stats
 
-    case __item_types_count:
+    case __equipment_types_count:
     default:
         print_error_and_exit("Unreachable item type %u in make_item_random_of_type", type);
     }
@@ -69,8 +82,10 @@ Item make_item_random_of_type(ItemType type)
     return item;
 }
 
-Item make_item_random(void)
-{ return make_item_random_of_type(rng_generate(ITEMS_RNG) % __item_types_count); }
+Item make_item_equipment_random(void)
+{ return make_item_equipment_random_of_type(rng_generate(ITEMS_RNG) % __equipment_types_count); }
 
-ItemSlot make_item_slot_random(void)
-{ return (ItemSlot){ .type = rng_generate(ITEMS_RNG) % __item_types_count }; }
+EquipmentSlot make_equipment_slot_random(void)
+{
+    return (EquipmentSlot){ .type = rng_generate(ITEMS_RNG) % __equipment_types_count };
+}

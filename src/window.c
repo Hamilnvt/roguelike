@@ -52,57 +52,62 @@ void update_window_main(void)
 {
     box(win_main.win, 0, 0);
 
-    update_camera();
+    if (game.map.enabled) {
+        mvwprintw(win_main.win, win_main.height/2, win_main.width/2-10, "TODO: map");
+        map_render(); // TODO: put into the Map struct the information about the rooms and their connections
+    } else {
+        update_camera();
 
-    for (size_t screen_y = 1; screen_y < win_main.height-1; screen_y++) {
-        for (size_t screen_x = 1; screen_x < win_main.width-1; screen_x++) {
-            int world_x = game.camera.x + screen_x - 1;
-            int world_y = game.camera.y + screen_y - 1;
+        for (size_t screen_y = 1; screen_y < win_main.height-1; screen_y++) {
+            for (size_t screen_x = 1; screen_x < win_main.width-1; screen_x++) {
+                int world_x = game.camera.x + screen_x - 1;
+                int world_y = game.camera.y + screen_y - 1;
 
-            if (world_x >= (int)CURRENT_ROOM->width || world_y >= (int)CURRENT_ROOM->height) {
-                mvwaddch(win_main.win, screen_y, screen_x, ' ');
-                continue;
+                if (world_x >= (int)CURRENT_ROOM->width || world_y >= (int)CURRENT_ROOM->height) {
+                    mvwaddch(win_main.win, screen_y, screen_x, ' ');
+                    continue;
+                }
+
+                const Tile *tile = tile_at(CURRENT_ROOM, world_x, world_y);
+                EntitiesIds *entities = entities_at(CURRENT_ROOM, world_x, world_y);
+                ItemsIndices *items = items_at(CURRENT_ROOM, world_x, world_y);
+
+                char c;
+
+                //if (da_is_empty(entities)) c = tile_char(tile);
+                //else {
+                //    if (tile->type == TILE_FLOOR) {
+                //        Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[(size_t)game.switch_timer%entities->count]);
+                //        if (!e || entity_is_dead(e)) continue;
+                //        c = entity_rank_char(e->rank);
+                //    } else {
+                //        size_t index = (size_t)game.switch_timer % (entities->count+1);
+                //        if (index == entities->count) c = tile_char(tile);
+                //        else {
+                //            Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[index]);
+                //            if (!e || entity_is_dead(e)) continue;
+                //            c = entity_rank_char(e->rank);
+                //        }
+                //    }
+                //}
+
+                // Priority: Entity > Item > Tile
+                if (!da_is_empty(entities)) {
+                    // ... existing entity rendering logic ...
+                    Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[(size_t)game.switch_timer%entities->count]);
+                    if (!e || entity_is_dead(e)) c = tile_char(tile); 
+                    else c = entity_rank_char(e->rank);
+                } else if (!da_is_empty(items)) c = 'i'; 
+                else c = tile_char(tile);
+                mvwaddch(win_main.win, screen_y, screen_x, c);
             }
-
-            const Tile *tile = tile_at(CURRENT_ROOM, world_x, world_y);
-            EntitiesIds *entities = entities_at(CURRENT_ROOM, world_x, world_y);
-            ItemsIndices *items = items_at(CURRENT_ROOM, world_x, world_y);
-
-            char c;
-
-            //if (da_is_empty(entities)) c = tile_char(tile);
-            //else {
-            //    if (tile->type == TILE_FLOOR) {
-            //        Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[(size_t)game.switch_timer%entities->count]);
-            //        if (!e || entity_is_dead(e)) continue;
-            //        c = entity_rank_char(e->rank);
-            //    } else {
-            //        size_t index = (size_t)game.switch_timer % (entities->count+1);
-            //        if (index == entities->count) c = tile_char(tile);
-            //        else {
-            //            Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[index]);
-            //            if (!e || entity_is_dead(e)) continue;
-            //            c = entity_rank_char(e->rank);
-            //        }
-            //    }
-            //}
-
-            // Priority: Entity > Item > Tile
-            if (!da_is_empty(entities)) {
-                 // ... existing entity rendering logic ...
-                 Entity *e = get_entity_by_id(CURRENT_ROOM, entities->items[(size_t)game.switch_timer%entities->count]);
-                 if (!e || entity_is_dead(e)) c = tile_char(tile); 
-                 else c = entity_rank_char(e->rank);
-            } else if (!da_is_empty(items)) c = 'i'; 
-            else c = tile_char(tile);
-            mvwaddch(win_main.win, screen_y, screen_x, c);
         }
-    }
 
-    mvwaddch(win_main.win,
-            PLAYER->pos.y - game.camera.y + 1,
-            PLAYER->pos.x - game.camera.x + 1,
-            '@');
+        mvwaddch(win_main.win,
+                PLAYER->pos.y - game.camera.y + 1,
+                PLAYER->pos.x - game.camera.x + 1,
+                '@');
+    }
 }
 
 void update_window_bottom(void)
@@ -117,15 +122,27 @@ void update_window_bottom(void)
 
         switch (tile->type)
         {
-            case TILE_FLOOR: wprintw(win_bottom.win, "Floor."); break;
-            case TILE_WALL:  wprintw(win_bottom.win, "Wall."); break;
-            case TILE_DOOR:
-                             if (tile->open) {
-                                 wprintw(win_bottom.win, "Open door (leads to room %d).", tile->leads_to >= 0 ? tile->leads_to : -1);
-                             } else {
-                                 wprintw(win_bottom.win, "Closed door (%s).", tile->heavy ? "Heavy" : "Normal");
-                             }
-                             break;
+    //case TILE_DOOR:
+
+            case TILE_FLOOR: wprintw(win_bottom.win, "Same old boring floor"); break;
+            //case TILE_WALL:  wprintw(win_bottom.win, "A wall... wait, how'd I get up here?"); break; // TODO: this should appear when standing on a wall
+            case TILE_WALL: {
+                wprintw(win_bottom.win, "A wall");
+                if (tile->destructible) wprintw(win_bottom.win, "... is that a crack?");
+                else wprintw(win_bottom.win, " that seems pretty solid to me");
+            } break;
+            case TILE_DOOR: {
+                 if (tile->open) {
+                     wprintw(win_bottom.win, "An open door that leads to ");
+                     if (tile->leads_to >= 0) wprintw(win_bottom.win, "room %d", tile->leads_to);
+                     else wprintw(win_bottom.win, "a new room");
+                 } else {
+                     wprintw(win_bottom.win, "A closed door. ");
+                     if (tile->heavy) wprintw(win_bottom.win,
+                             "It's massive. It requires an extraordinary act of strength to open it.");
+                     else wprintw(win_bottom.win, "It seems that it can be opened, I wonder how, though.");
+                 }
+            } break;
 
             case __tile_types_count:
             default: break;
@@ -255,9 +272,9 @@ void show_entity_info(Entity *e)
     if (da_is_empty(&e->equipment)) {
         waddstr(win_right.win, "none");
     } else {
-        da_foreach(e->equipment, ItemSlot, item_slot) {
-            mvwprintw(win_right.win, line++, 1, "- %s (%s)", item_type_to_string(item_slot->type),
-                    item_slot->occupied ? item_slot->item.name : "empty");
+        da_foreach(e->equipment, EquipmentSlot, slot) {
+            mvwprintw(win_right.win, line++, 1, "- %s (%s)", equipment_type_to_string(slot->type),
+                    slot->occupied ? slot->item.name : "empty");
         }
     }
 
@@ -269,7 +286,19 @@ void show_entity_info(Entity *e)
             waddstr(win_right.win, "empty");
         } else {
             da_foreach(e->inventory, Item, item) {
-                mvwprintw(win_right.win, line++, 1, "- %s (%s)", item->name, item_type_to_string(item->type));
+                mvwprintw(win_right.win, line++, 1, "- %s ", item->name);
+                switch (item->kind)
+                {
+                case ITEM_EQUIPMENT:
+                    wprintw(win_right.win, "(%s)", equipment_type_to_string(item->equipment_type));
+                    break;
+                case ITEM_COLLECTIBLE:
+                    wprintw(win_right.win, "(%s)", collectible_type_to_string(item->collectible_type));
+                    break;
+                case __item_kinds_count:
+                default:
+                    print_error_and_exit("Unreachable item kind %u in show_entity_info", item->kind);
+                }
             }
         }
         break;

@@ -104,31 +104,52 @@ typedef struct
 
 typedef enum
 {
-    ITEM_HELMET,
-    ITEM_HAT,
-    ITEM_GOGGLES,
-    ITEM_SCARF,
-    ITEM_CHESTPLATE,
-    ITEM_CHAUSSES,
-    ITEM_SHOE,
-    ITEM_GLOVE,
-    ITEM_SWORD,
-    ITEM_SHIELD,
-    ITEM_SCROLL,
-    ITEM_STAFF,
-    __item_types_count
-} ItemType;
+    ITEM_EQUIPMENT,
+    ITEM_COLLECTIBLE,
+    __item_kinds_count
+} ItemKind;
 
-#define ITEM_NAME_MAX_LEN 31
+typedef enum
+{
+    EQUIPMENT_HELMET,
+    EQUIPMENT_HAT,
+    EQUIPMENT_GOGGLES,
+    EQUIPMENT_SCARF,
+    EQUIPMENT_CHESTPLATE,
+    EQUIPMENT_CHAUSSES,
+    EQUIPMENT_SHOE,
+    EQUIPMENT_GLOVE,
+    EQUIPMENT_SWORD,
+    EQUIPMENT_SHIELD,
+    EQUIPMENT_SCROLL,
+    EQUIPMENT_STAFF,
+    __equipment_types_count
+} EquipmentType;
+
+typedef enum
+{
+    COLLECTIBLE_SIMPLE_KEY,
+    COLLECTIBLE_SPECIAL_KEY,
+    __collectible_types_count
+} CollectibleType;
+
 typedef struct
 {
-    ItemType type;
-    char name[ITEM_NAME_MAX_LEN + 1];
+    ItemKind kind;
+    char name[32];
     V2i pos;
-    int durability;
-    Stats stats;
     bool picked_up;
-    Effects effects;
+    union {
+        struct { // Equipment
+            EquipmentType equipment_type;
+            int durability;
+            Stats stats;
+            Effects effects;
+        };
+        struct { // Collectible
+            CollectibleType collectible_type;
+        };
+    };
 } Item;
 
 typedef struct
@@ -147,14 +168,14 @@ typedef struct
 
 typedef struct
 {
-    ItemType type;
+    EquipmentType type;
     bool occupied;
     Item item;
-} ItemSlot;
+} EquipmentSlot;
 
 typedef struct
 {
-    ItemSlot *items;
+    EquipmentSlot *items;
     size_t count;
     size_t capacity;
 } Equipment;
@@ -209,12 +230,11 @@ typedef struct
 
 typedef Power Powers[__power_types_count]; // TODO
 
-#define ENTITY_NAME_MAX_LEN 31
 struct Entity
 {
     uint64_t id;
     EntityType type;
-    char name[ENTITY_NAME_MAX_LEN + 1];
+    char name[32];
     uint64_t faction;
     V2i pos;
     Direction direction;
@@ -287,6 +307,16 @@ typedef struct
     Rooms rooms;
 } Data;
 
+typedef struct
+{
+    bool enabled;
+    enum {
+        MAP_STATE_LIST,
+        MAP_STATE_CONNECTIONS,
+        __map_states_count
+    } state;
+} Map;
+
 #define MAX_MESSAGES 25
 typedef struct
 {
@@ -304,6 +334,8 @@ typedef struct
     // Timers
     float save_timer;
     float switch_timer;
+
+    Map map;
 
     bool looking;
     bool showing_general_info;
@@ -498,10 +530,11 @@ void player_equip_all(void);
 void check_player_look_direction(void);
 
 // item.c
-const char *item_type_to_string(ItemType type);
-Item make_item_random_of_type(ItemType type);
-Item make_item_random(void);
-ItemSlot make_item_slot_random(void);
+const char *equipment_type_to_string(EquipmentType type);
+const char *collectible_type_to_string(CollectibleType type);
+Item make_item_equipment_random_of_type(EquipmentType type);
+Item make_item_equipment_random(void);
+EquipmentSlot make_equipment_slot_random(void);
 
 // effect.c
 EffectDefinition *get_effect(EffectType type);

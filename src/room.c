@@ -226,7 +226,7 @@ void spawn_random_item(Room *room)
 {
     V2i pos;
     if (!get_random_entity_slot_as_vector(room, &pos)) return;
-    Item item = make_item_random();
+    Item item = make_item_equipment_random();
     item.pos = pos;
     da_push(&room->items, item);
 }

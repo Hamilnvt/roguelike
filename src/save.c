@@ -69,39 +69,85 @@ bool load_vector(FILE *f, V2i *v)
     return true;
 }
 
+/*
+typedef struct
+{
+    union {
+        struct { // Equipment
+            EquipmentType equipment_type;
+            int durability;
+            Stats stats;
+            Effects effects;
+        };
+        struct { // Collectible
+            CollectibleType collectible_type;
+        };
+    };
+} Item;
+*/
+
 void save_item(FILE *f, Item *item)
 {
-    fwrite(&item->type, sizeof(ItemType), 1, f);
+    fwrite(&item->kind, sizeof(ItemKind), 1, f);
     fwrite(item->name, sizeof(item->name), 1, f);
     save_vector(f, &item->pos);
-    fwrite(&item->durability, sizeof(int), 1, f);
-    save_stats(f, &item->stats);
     fwrite(&item->picked_up, sizeof(bool), 1, f);
-    save_da(item->effects, save_effect, f); 
+
+    switch (item->kind)
+    {
+    case ITEM_EQUIPMENT: {
+        fwrite(&item->equipment_type, sizeof(EquipmentType), 1, f);
+        fwrite(&item->durability, sizeof(int), 1, f);
+        save_stats(f, &item->stats);
+        save_da(item->effects, save_effect, f); 
+    } break;
+    case ITEM_COLLECTIBLE: {
+        fwrite(&item->collectible_type, sizeof(CollectibleType), 1, f);
+    } break;
+
+    case __item_kinds_count:
+    default:
+        print_error_and_exit("Unreachable item kind %u in save_item", item->kind);
+    }
 }
 bool load_item(FILE *f, Item *item)
 {
-    if (fread(&item->type, sizeof(ItemType), 1, f) != 1) goto fail;
+    if (fread(&item->kind, sizeof(ItemKind), 1, f) != 1) goto fail;
     if (fread(item->name, sizeof(item->name), 1, f) != 1) goto fail;
     if (!load_vector(f, &item->pos)) goto fail;
-    if (fread(&item->durability, sizeof(int), 1, f) != 1) goto fail;
-    if (!load_stats(f, &item->stats)) goto fail;
     if (fread(&item->picked_up, sizeof(bool), 1, f) != 1) goto fail;
-    load_da(&item->effects, load_effect, f); 
+
+    switch (item->kind)
+    {
+    case ITEM_EQUIPMENT: {
+        if (fread(&item->equipment_type, sizeof(EquipmentType), 1, f) != 1) goto fail;
+        if (fread(&item->durability, sizeof(int), 1, f) != 1) goto fail;
+        if (!load_stats(f, &item->stats)) goto fail;
+        load_da(&item->effects, load_effect, f);
+    } break;
+    case ITEM_COLLECTIBLE: {
+        if (fread(&item->collectible_type, sizeof(CollectibleType), 1, f) != 1) goto fail;
+    } break;
+
+    case __item_kinds_count:
+    default:
+        print_error_and_exit("Unreachable item kind %u in save_item", item->kind);
+    }
+
     return true;
 fail:
     return false;
 }
 
-void save_item_slot(FILE *f, ItemSlot *slot)
+void save_equipment_slot(FILE *f, EquipmentSlot *slot)
 {
-    fwrite(&slot->type, sizeof(ItemType), 1, f);
+    fwrite(&slot->type, sizeof(EquipmentType), 1, f);
     fwrite(&slot->occupied, sizeof(bool), 1, f);
     save_item(f, &slot->item);
 }
-bool load_item_slot(FILE *f, ItemSlot *slot)
+bool load_equipment_slot(FILE *f, EquipmentSlot *slot)
 {
-    if (fread(&slot->type, sizeof(ItemType), 1, f) != 1) return false;
+    if (fread(&slot->type, sizeof(EquipmentType), 1, f) != 1) return false;
     if (fread(&slot->occupied, sizeof(bool), 1, f) != 1) return false;
     if (!load_item(f, &slot->item)) return false;
     return true;
@@ -138,7 +184,7 @@ void save_entity(FILE *f, Entity *e)
     save_stats(f, &e->base_stats);
     save_stats(f, &e->extra_stats);
     
-    save_da(e->equipment, save_item_slot, f);
+    save_da(e->equipment, save_equipment_slot, f);
     save_da(e->effects, save_effect, f);
 
     switch (e->type)
@@ -173,7 +219,7 @@ bool load_entity(FILE  *f, Entity *e)
     if (!load_stats(f, &e->base_stats)) goto fail;
     if (!load_stats(f, &e->extra_stats)) goto fail;
 
-    load_da(&e->equipment, load_item_slot, f);
+    load_da(&e->equipment, load_equipment_slot, f);
     e->extra_stats = entity_extra_stats_from_equipment(e);
 
     load_da(&e->effects, load_effect, f);
@@ -324,7 +370,9 @@ void save_data()
 
 void init_data(void)
 {
-    uint64_t seed = time(NULL);
+    RNG seed_rng = {0};
+    rng_init(&seed_rng, time(NULL));
+    uint64_t seed = rng_generate(&seed_rng);
     game.data.rng_seed = seed;
     rng_init(&game.data.rooms_rng,    seed++);
     rng_init(&game.data.entities_rng, seed++);
@@ -347,11 +395,11 @@ void init_data(void)
     
     // TODO: maybe let the player choose "a class" from which to start
     //       and they will have different item slots / initial equipment
-    da_push(&player.equipment, (ItemSlot){.type = ITEM_HELMET });
-    da_push(&player.equipment, (ItemSlot){.type = ITEM_CHESTPLATE });
-    da_push(&player.equipment, (ItemSlot){.type = ITEM_CHAUSSES });
-    da_push(&player.equipment, (ItemSlot){.type = ITEM_SWORD });
-    da_push(&player.equipment, (ItemSlot){.type = ITEM_SHIELD });
+    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_HELMET });
+    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_CHESTPLATE });
+    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_CHAUSSES });
+    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_SWORD });
+    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_SHIELD });
 
     player.current_health = player.base_stats.health;
     memcpy(player.name, "Adventurer", 10);

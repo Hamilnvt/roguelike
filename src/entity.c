@@ -62,9 +62,9 @@ static inline Stats stats_sum(Stats s1, Stats s2)
 Stats entity_extra_stats_from_equipment(Entity *e)
 {
     Stats stats = {0};
-    da_foreach (e->equipment, ItemSlot, item_slot) {
-        if (!item_slot->occupied) continue;
-        stats = stats_sum(stats, item_slot->item.stats);     
+    da_foreach (e->equipment, EquipmentSlot, slot) {
+        if (!slot->occupied) continue;
+        stats = stats_sum(stats, slot->item.stats);     
     }
     return stats;
 }
@@ -125,12 +125,12 @@ Entity make_entity_random_at(size_t x, size_t y)
 
     size_t items_count = rng_generate(ENTITIES_RNG) % (e.rank+1);
     for (size_t i = 0; i < items_count; i++) {
-        ItemSlot item_slot = make_item_slot_random();
-        Item item = make_item_random_of_type(item_slot.type);
+        EquipmentSlot slot = make_equipment_slot_random();
+        Item item = make_item_equipment_random_of_type(slot.type);
         item.picked_up = true;
-        item_slot.item = item;
-        item_slot.occupied = true;
-        da_push(&e.equipment, item_slot);
+        slot.item = item;
+        slot.occupied = true;
+        da_push(&e.equipment, slot);
     }
 
     e.extra_stats = entity_extra_stats_from_equipment(&e);
@@ -529,12 +529,12 @@ void check_player_look_direction(void)
 
 void player_equip_all(void)
 {
-    da_foreach (PLAYER->equipment, ItemSlot, slot) {
+    da_foreach (PLAYER->equipment, EquipmentSlot, slot) {
         if (slot->occupied) continue;
         size_t i = 0;
         while (i < PLAYER->inventory.count) {
             Item *item = &PLAYER->inventory.items[i];
-            if (item->type == slot->type) {
+            if (item->kind == ITEM_EQUIPMENT && item->equipment_type == slot->type) {
                 slot->item = *item;
                 slot->occupied = true;
                 da_remove(&PLAYER->inventory, i);

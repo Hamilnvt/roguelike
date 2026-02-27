@@ -122,10 +122,14 @@ int main(int argc, char **argv)
     if (streq(command, "build")) {
         if (!build()) return 1;
     } else if (streq(command, "run")) {
+        if (!run()) return 1;
+    } else if (streq(command, "build+run")) {
         if (!build()) return 1;
         if (!run()) return 1;
     } else if (streq(command, "clean")) {
         if (!clean()) return 1;
+    } else if (streq(command, "delete-save")) {
+        if (!delete_file("save.bin")) return 1;
     } else {
         nob_log(ERROR, "Unknown command `%s`", command);
         return 1;
