@@ -270,7 +270,7 @@ void show_entity_info(Entity *e)
     mvwprintw(win_right.win, 0, 1, "%s (%s)", e->name, entity_type_to_string(e->type));
     size_t line = 2;
     mvwprintw(win_right.win, line++, 1, "Rank: %s level %zu ", entity_rank_to_string(e->rank), e->level);
-    if (entity_is_player(e)) mvwprintw(win_right.win, line, 1, "Exp: %zu", PLAYER->xp);
+    if (entity_is_player(e)) mvwprintw(win_right.win, line++, 1, "Exp: %zu", PLAYER->xp);
     
     Faction *faction = get_faction_by_id(e->faction, NULL);
     mvwprintw(win_right.win, line++, 1, "Faction: %s", faction ? faction->name : "none");

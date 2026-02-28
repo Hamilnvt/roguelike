@@ -318,6 +318,9 @@ typedef struct
     RNG items_rng;
     RNG combat_rng;
 
+    uint64_t entity_id_counter;
+    uint64_t faction_id_counter;
+
     Factions factions;
     Rooms rooms;
     Map map;
@@ -531,7 +534,8 @@ const char *entity_type_to_string(EntityType type);
 char entity_rank_char(EntityRank rank);
 bool entity_is_player(Entity *e);
 bool entity_is_dead(Entity *entity);
-Stats entity_extra_stats_from_equipment(Entity *e);
+Stats entity_calculate_base_stats(Entity *e);
+Stats entity_calculate_extra_stats(Entity *e);
 Entity make_entity_random_at(size_t x, size_t y);
 Entity *get_entity_by_id(Room *room, uint64_t id);
 Faction *get_faction_by_id(uint64_t id, size_t *index);

@@ -220,7 +220,7 @@ bool load_entity(FILE  *f, Entity *e)
     if (!load_stats(f, &e->extra_stats)) goto fail;
 
     load_da(&e->equipment, load_equipment_slot, f);
-    e->extra_stats = entity_extra_stats_from_equipment(e);
+    e->extra_stats = entity_calculate_extra_stats(e);
 
     load_da(&e->effects, load_effect, f);
 
@@ -359,7 +359,7 @@ fail:
 }
 
 #define SAVE_FILEPATH "./save.bin"
-void save_data()
+void save_data(void)
 {
     FILE *save_file = fopen(SAVE_FILEPATH, "wb");    
     if (!save_file) {
@@ -378,6 +378,9 @@ void save_data()
     save_rng(save_file, &game.data.entities_rng);
     save_rng(save_file, &game.data.items_rng);
     save_rng(save_file, &game.data.combat_rng);
+
+    fwrite(&game.data.entity_id_counter, sizeof(uint64_t), 1, save_file);
+    fwrite(&game.data.faction_id_counter, sizeof(uint64_t), 1, save_file);
 
     save_da(game.data.factions, save_faction, save_file);
     save_da(game.data.rooms, save_room, save_file);
@@ -398,39 +401,35 @@ void init_data(void)
     rng_init(&game.data.items_rng,    seed++);
     rng_init(&game.data.combat_rng,   seed++);
 
-    Entity player = {
+    game.data.player = (Entity){
         .type = ENTITY_PLAYER,
         .rank = RANK_CIVILIAN,
         .level = 1,
-
-        .base_stats = (Stats) {
-            .health   = 100,
-            .defense  = 5,
-            .accuracy = 75,
-            .attack   = 10,
-            .agility  = 75
-        }
     };
-    
+
+    PLAYER->base_stats = entity_calculate_base_stats(PLAYER);
+
     // TODO: maybe let the player choose "a class" from which to start
     //       and they will have different item slots / initial equipment
-    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_HELMET });
-    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_CHESTPLATE });
-    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_CHAUSSES });
-    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_SWORD });
-    da_push(&player.equipment, (EquipmentSlot){ .type = EQUIPMENT_SHIELD });
+    da_push(&PLAYER->equipment, (EquipmentSlot){ .type = EQUIPMENT_HELMET });
+    da_push(&PLAYER->equipment, (EquipmentSlot){ .type = EQUIPMENT_CHESTPLATE });
+    da_push(&PLAYER->equipment, (EquipmentSlot){ .type = EQUIPMENT_CHAUSSES });
+    da_push(&PLAYER->equipment, (EquipmentSlot){ .type = EQUIPMENT_SWORD });
+    da_push(&PLAYER->equipment, (EquipmentSlot){ .type = EQUIPMENT_SHIELD });
 
-    player.current_health = player.base_stats.health;
-    memcpy(player.name, "Adventurer", 10);
+    PLAYER->current_health = PLAYER->base_stats.health;
+
+    memcpy(PLAYER->name, "Adventurer", 10);
+
+    game.data.entity_id_counter = 1;
+    game.data.faction_id_counter = 1;
 
     Room *initial_room = generate_initial_room();
     game.data.current_room_index = initial_room->index;
 
     da_push(&game.data.map, (RoomDescription){ .name = "Initial Room" });
 
-    player.pos = (V2i){initial_room->width/2, initial_room->height/2};
-
-    game.data.player = player;
+    PLAYER->pos = (V2i){initial_room->width/2, initial_room->height/2};
 }
 
 bool load_data(void)
@@ -449,6 +448,9 @@ bool load_data(void)
     if (!load_rng(save_file, &game.data.entities_rng)) goto fail;
     if (!load_rng(save_file, &game.data.items_rng)) goto fail;
     if (!load_rng(save_file, &game.data.combat_rng)) goto fail;
+
+    if (fread(&game.data.entity_id_counter, sizeof(uint64_t), 1, save_file) != 1) goto fail;
+    if (fread(&game.data.faction_id_counter, sizeof(uint64_t), 1, save_file) != 1) goto fail;
 
     load_da(&game.data.factions, load_faction, save_file);
     load_da(&game.data.rooms, load_room, save_file);

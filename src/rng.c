@@ -38,6 +38,7 @@ bool rng_bernoulli(RNG *rng, double p) { return rng_generate_double(rng) < p; }
 
 int64_t rng_range(RNG *rng, int64_t begin, int64_t end)
 {
+    if (end < begin) log_this("ERROR: invalid range [%ld, %ld]", begin, end);
     assert(end >= begin);
 
     uint64_t range = (uint64_t)end - (uint64_t)begin;

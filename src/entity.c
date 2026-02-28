@@ -59,24 +59,41 @@ static inline Stats stats_sum(Stats s1, Stats s2)
     };
 }
 
-Stats entity_extra_stats_from_equipment(Entity *e)
+static const float STAT_MULTIPLIER_ATTACK   = 10.0f;
+static const float STAT_MULTIPLIER_ACCURACY = 75.0f;
+static const float STAT_MULTIPLIER_HEALTH   = 100.0f;
+static const float STAT_MULTIPLIER_DEFENSE  = 5.0f;
+static const float STAT_MULTIPLIER_AGILITY  = 75.0f;
+
+Stats entity_calculate_base_stats(Entity *e)
+{
+    return (Stats){
+        .attack   = (e->rank+1) * e->level * STAT_MULTIPLIER_ATTACK,
+        .accuracy = (e->rank+1) * e->level * STAT_MULTIPLIER_ACCURACY,
+        .health   = (e->rank+1) * e->level * STAT_MULTIPLIER_HEALTH,
+        .defense  = (e->rank+1) * e->level * STAT_MULTIPLIER_DEFENSE,
+        .agility  = (e->rank+1) * e->level * STAT_MULTIPLIER_AGILITY
+    };
+}
+
+Stats entity_calculate_extra_stats(Entity *e)
 {
     Stats stats = {0};
     da_foreach (e->equipment, EquipmentSlot, slot) {
         if (!slot->occupied) continue;
         stats = stats_sum(stats, slot->item.stats);     
     }
+    // TODO: account powers and effects
     return stats;
 }
 
 #define NO_FACTION 0
-static uint64_t faction_id_count = 1;
 uint64_t get_random_faction_id(void)
 {
     size_t index = rng_generate(ENTITIES_RNG) % (game.data.factions.count+1);
     if (index == game.data.factions.count) {
         Faction faction = {
-            .id = faction_id_count++,
+            .id = game.data.faction_id_counter++,
             .members = 1
         };
         snprintf(faction.name, sizeof(faction.name), "Faction %lu", faction.id); // TODO: random name
@@ -102,26 +119,17 @@ Faction *get_faction_by_id(uint64_t id, size_t *index)
     return NULL;
 }
 
-static uint64_t entity_id_counter = 1;
 Entity make_entity_random_at(size_t x, size_t y)
 {
     Entity e = {
-        .id = entity_id_counter++,
+        .id = game.data.entity_id_counter++,
         .type = ENTITY_GENERIC,
         .faction = get_random_faction_id(),
         .pos = (V2i){x, y},
         .direction = rng_generate(ENTITIES_RNG) % __directions_count,
         .rank      = rng_generate(ENTITIES_RNG) % __entity_ranks_count,
-        .level     = rng_generate(ENTITIES_RNG) % (10*(e.rank+1)) + 1,
-        .base_stats = (Stats){
-            .health  = rng_generate(ENTITIES_RNG) % (100*(e.rank+1)),
-            .defense = rng_generate(ENTITIES_RNG) % (10*(e.rank+1)),
-            .accuracy = rng_generate(ENTITIES_RNG) % (100*(e.rank+1)),
-            .attack  = rng_generate(ENTITIES_RNG) % (100*(e.rank+1)),
-            .agility = rng_generate(ENTITIES_RNG) % (10*(e.rank+1))
-        },
-        .movement_timer = rng_generate(ENTITIES_RNG) % 10 + 2
     };
+    e.level = rng_range(ENTITIES_RNG, (PLAYER->level/2)*(e.rank+1), 3*(PLAYER->level/2)*(e.rank+1)) + 1;
 
     size_t items_count = rng_generate(ENTITIES_RNG) % (e.rank+1);
     for (size_t i = 0; i < items_count; i++) {
@@ -133,10 +141,19 @@ Entity make_entity_random_at(size_t x, size_t y)
         da_push(&e.equipment, slot);
     }
 
-    e.extra_stats = entity_extra_stats_from_equipment(&e);
+    e.base_stats = entity_calculate_base_stats(&e);
+    e.base_stats.attack   += rng_range(ENTITIES_RNG, -1 * e.base_stats.attack   / 2,   e.base_stats.attack / 2);
+    e.base_stats.accuracy += rng_range(ENTITIES_RNG, -1 * e.base_stats.accuracy / 2, e.base_stats.accuracy / 2);
+    e.base_stats.health   += rng_range(ENTITIES_RNG, -1 * e.base_stats.health   / 2,   e.base_stats.health / 2);
+    e.base_stats.defense  += rng_range(ENTITIES_RNG, -1 * e.base_stats.defense  / 2,  e.base_stats.defense / 2);
+    e.base_stats.agility  += rng_range(ENTITIES_RNG, -1 * e.base_stats.agility  / 2,  e.base_stats.agility / 2);
+
+    e.extra_stats = entity_calculate_extra_stats(&e);
     e.current_health = e.base_stats.health + e.extra_stats.health;
 
-    snprintf(e.name, sizeof(e.name), "Entity %lu", e.id); // TODO: random name
+    e.movement_timer = STAT_MULTIPLIER_AGILITY / (e.base_stats.agility + e.extra_stats.agility);
+
+    snprintf(e.name, sizeof(e.name), "Entity %llx", (unsigned long long)e.id); // TODO: random name
 
     return e;
 }
@@ -159,12 +176,20 @@ Entity make_entity_random(size_t x_low, size_t x_high, size_t y_low, size_t y_hi
     return make_entity_random_at(x, y);
 }
 
+static void entity_level_up(Entity *e)
+{
+    write_message("%s level up!", e->name);
+    e->level += 1;
+    e->base_stats = entity_calculate_base_stats(e);
+    if (e->current_health < e->base_stats.health) e->current_health = e->base_stats.health;
+}
+
 static inline void player_killed_entity(Entity *e)
 {
     write_message("You killed %s", e->name);
     e->dead = true;
-    PLAYER->level += 1;
-    PLAYER->xp += e->level;
+    entity_level_up(PLAYER);
+    PLAYER->xp += e->level * (e->rank+1);
     // TODO: think about what should happen
 }
 
@@ -242,18 +267,19 @@ void entity_die(Entity *entity, DeathCause cause, ...)
 
     if (player_is_dying) {
         // TODO: think about what should happen next
-        // - lose levels, items or something else?
-        if (PLAYER->level > 1) PLAYER->level -= 1;
-        game.data.current_room_index = 0; // maybe go to initial room
-                                          // (that could be "safer", less to no monsters, some way to heal...)
+        // - lose all items?
+        // - what else?
+        // - for n times where n is the difference in rank + 1:
+        //   > lose 1 item or ... ? 
+        if (PLAYER->level > 1) PLAYER->level -= 1; // TODO: how many?
+        game.data.current_room_index = 0;
 
-        PLAYER->pos = (V2i){CURRENT_ROOM->width/2, 5}; // just to see something
-        PLAYER->current_health = 100*PLAYER->level; // TODO okaye, I got it:
-                                                   //      levels give base stats and items add them up
-                                                   //      so, now I just have to calculate what is the base health
-                                                   //      for the level;
-        PLAYER->extra_stats = (Stats){0};
-        // TODO: recalculate extra stats based on kept equipment/powers
+        PLAYER->pos = (V2i){CURRENT_ROOM->width/2, 5}; // TODO just to see something
+
+        PLAYER->extra_stats = entity_calculate_extra_stats(PLAYER);
+        PLAYER->base_stats  = entity_calculate_base_stats(PLAYER);
+        PLAYER->current_health = PLAYER->base_stats.health + PLAYER->extra_stats.health;
+
         PLAYER->faction = NO_FACTION;
     } else {
         entity->dead = true;
@@ -558,6 +584,5 @@ void player_equip_all(void)
             } else i++;
         }
     }
-    // TODO: be careful because maybe some other things will give extra stats, not just items and this overwrites all
-    PLAYER->extra_stats = entity_extra_stats_from_equipment(PLAYER);
+    PLAYER->extra_stats = entity_calculate_extra_stats(PLAYER);
 }
