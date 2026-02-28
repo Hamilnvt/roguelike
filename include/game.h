@@ -136,7 +136,7 @@ typedef enum
 typedef struct
 {
     ItemKind kind;
-    char name[32];
+    char name[16];
     V2i pos;
     bool picked_up;
     union {
@@ -208,7 +208,7 @@ typedef enum
 typedef struct
 {
     uint64_t id;
-    char name[32];
+    char name[24];
     size_t members; // If members is 0 the faction dies
     // TODO: what else?
 } Faction;
@@ -236,7 +236,7 @@ struct Entity
 {
     uint64_t id;
     EntityType type;
-    char name[32];
+    char name[16];
     uint64_t faction;
     V2i pos;
     Direction direction;
@@ -474,6 +474,7 @@ float get_time_in_seconds(void);
 char sign_as_char(int value);
 _Noreturn void print_error_and_exit(const char *fmt, ...);
 void log_this(char *format, ...);
+void generate_name(char *output_buffer, size_t max_len);
 
 // game.c
 void game_init(void);

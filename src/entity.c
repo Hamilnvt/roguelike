@@ -96,9 +96,9 @@ uint64_t get_random_faction_id(void)
             .id = game.data.faction_id_counter++,
             .members = 1
         };
-        snprintf(faction.name, sizeof(faction.name), "Faction %lu", faction.id); // TODO: random name
+        generate_name(faction.name, sizeof(faction.name));
         da_push(&game.data.factions, faction);
-        write_message("Faction '%s' arises", faction.name);
+        write_message("Faction \"%s\" arises", faction.name);
         return faction.id;
     } else {
         Faction *faction = &game.data.factions.items[index];
@@ -153,7 +153,7 @@ Entity make_entity_random_at(size_t x, size_t y)
 
     e.movement_timer = STAT_MULTIPLIER_AGILITY / (e.base_stats.agility + e.extra_stats.agility);
 
-    snprintf(e.name, sizeof(e.name), "Entity %llx", (unsigned long long)e.id); // TODO: random name
+    generate_name(e.name, sizeof(e.name));
 
     return e;
 }
