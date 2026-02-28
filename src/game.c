@@ -75,11 +75,24 @@ void process_pressed_key(void)
     {
         case 'w':
         case KEY_UP:
-            player_move(DIRECTION_UP);
+            if (game.map.enabled) {
+                if (game.map.index > 0) {
+                    game.map.index--;
+                    if (game.map.index < game.map.offset) game.map.offset = game.map.index;
+                }
+            } else player_move(DIRECTION_UP);
             break;
 
         case 's':
-        case KEY_DOWN: player_move(DIRECTION_DOWN); break;
+        case KEY_DOWN: 
+            if (game.map.enabled) {
+                if (game.map.index < game.data.map.count-1) {
+                    game.map.index++;
+                    if (game.map.index >= (game.map.offset + win_main.height - 2))
+                        game.map.offset++;
+                }
+            } else player_move(DIRECTION_DOWN);
+            break;
 
         case 'a':
         case KEY_LEFT: player_move(DIRECTION_LEFT); break;
@@ -111,9 +124,10 @@ void process_pressed_key(void)
 
         case 'l': game.looking = !game.looking; break;
 
-        case 'M': game.map.enabled = !game.map.enabled; break;
         case 'm':
-            game.map.state = (game.map.state + 1) % __map_states_count;
+            game.map.enabled = !game.map.enabled;
+            game.map.index = CURRENT_ROOM->index;
+            game.map.offset = CURRENT_ROOM->index - ((win_main.height-1)/2-1);
             break;
 
         case CTRL('S'): save_data(); break;
@@ -127,48 +141,15 @@ void process_pressed_key(void)
             }
             break;
 
+        case 'c':
+            if (game.map.enabled) game.map.show_current_connections = !game.map.show_current_connections;
+            break;
+
         case 't':
             game.showing_tooltips = !game.showing_tooltips;
             if (game.showing_tooltips) write_message("Show tooltips");
             else write_message("Hide tooltips");
             break;
-
-        //case ALT_0:
-        //case ALT_1:
-        //case ALT_2:
-        //case ALT_3:
-        //case ALT_4:
-        //case ALT_5:
-        //case ALT_6:
-        //case ALT_7:
-        //case ALT_8:
-        //case ALT_9:
-        //case KEY_UP:
-        //case ALT_k:
-        //case KEY_DOWN:
-        //case ALT_j:
-        //case KEY_LEFT:
-        //case ALT_h:
-        //case KEY_RIGHT:
-        //case ALT_l:
-        //case ALT_K:
-        //case ALT_J:
-        //case ALT_H:
-        //case ALT_L:
-        //case ALT_m:
-        //case ALT_p:
-        //case ALT_n:
-        //case ALT_c:
-        //case ALT_C:
-        //case CTRL_ALT_C:
-        //case KEY_PPAGE:
-        //case CTRL_ALT_K:
-        //case KEY_NPAGE:
-        //case CTRL_ALT_J:
-        //case ALT_COLON:
-        //case ALT_BACKSPACE:
-        //case TAB:
-        //case KEY_BTAB:
 
         default:
             if (isprint(key)) log_this("Unprocessed key '%c'", key);

@@ -454,25 +454,42 @@ void player_pickup_items(ItemsIndices *items_indices)
 static inline void player_set_position_and_direction_entering_room(Room *room, Tile *door)
 { entity_set_position_and_direction_entering_room(PLAYER, room, door); }
 
+static void map_add_connection(size_t from_index, size_t to_index)
+{
+    RoomDescription *from_desc = &game.data.map.items[from_index];
+    for (size_t i = 0; i < from_desc->connections.count; i++) {
+        if (from_desc->connections.items[i] == to_index) return;
+    }
+    da_push(&from_desc->connections, to_index);
+    da_push(&game.data.map.items[to_index].connections, from_index);
+}
+
 void player_interact_with_door(Tile *door)
 {
+    size_t leaving_room_index = CURRENT_ROOM->index;
     if (door->open) {
-        Tile *arrival_door;
+        Tile *arrival_door = NULL;
         if (door->leads_to == DOOR_LEADS_TO_NEW_ROOM) {
             Room *new_room = generate_room();
-            int leaving_room_index = CURRENT_ROOM->index;
             game.data.current_room_index = new_room->index;
-            door->leads_to = game.data.rooms.count-1;
+            door->leads_to = new_room->index;
 
             arrival_door = get_random_perimeter_wall(CURRENT_ROOM);
             set_tile_door(arrival_door, DOOR_IS_OPEN, !DOOR_IS_HEAVY, leaving_room_index);
+
+            char buffer[64] = {0};
+            snprintf(buffer, sizeof(buffer), "This is room %zu", new_room->index);
+            RoomDescription desc = {0};
+            strncpy(desc.name, buffer, strlen(buffer));
+            da_push(&game.data.map, desc);
         } else {
-            int leaving_room_index = CURRENT_ROOM->index;
             game.data.current_room_index = door->leads_to;
             arrival_door = get_door_that_leads_to(leaving_room_index);
         }
         assert(arrival_door != NULL);
         player_set_position_and_direction_entering_room(CURRENT_ROOM, arrival_door);
+
+        map_add_connection(leaving_room_index, CURRENT_ROOM->index);
     } else if (door->heavy) {
 
     } else {

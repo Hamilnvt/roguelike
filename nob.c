@@ -80,13 +80,6 @@ bool build(void)
     return true;
 }
 
-bool run(void)
-{
-    Cmd cmd = {0};
-    cmd_append(&cmd, "./build/roguelike.gcc");
-    return cmd_run(&cmd);
-}
-
 bool clean(void)
 {
     Nob_File_Paths build_files = {0};
@@ -121,11 +114,6 @@ int main(int argc, char **argv)
 
     if (streq(command, "build")) {
         if (!build()) return 1;
-    } else if (streq(command, "run")) {
-        if (!run()) return 1;
-    } else if (streq(command, "build+run")) {
-        if (!build()) return 1;
-        if (!run()) return 1;
     } else if (streq(command, "clean")) {
         if (!clean()) return 1;
     } else if (streq(command, "delete-save")) {

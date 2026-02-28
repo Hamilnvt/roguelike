@@ -2,9 +2,9 @@
 
 void cleanup_on_terminating_signal(int sig)
 {
+    print_error_and_exit("Program terminated with signal %d: %s", sig, strsignal(sig));
     log_this("Program terminated with signal %d: %s", sig, strsignal(sig));
     ncurses_end();
-    system("reset"); // TODO: not the greatest solution
     exit(1);
 }
 
@@ -17,10 +17,10 @@ void colors_init(void)
             init_color(R_COLOR_FOREGROUND, RGB_TO_NCURSES(150, 200, 150));
             init_color(R_COLOR_YELLOW, RGB_TO_NCURSES(178, 181, 0));
             init_color(R_COLOR_RED, RGB_TO_NCURSES(150, 20, 20));
-            init_color(R_COLOR_BLUE, RGB_TO_NCURSES(20, 20, 150));
+            init_color(R_COLOR_BLUE, RGB_TO_NCURSES(80, 80, 180));
 
-            init_pair(R_PAIR,     R_COLOR_FOREGROUND, R_COLOR_BACKGROUND);
-            init_pair(R_PAIR_INV, R_COLOR_BACKGROUND, R_COLOR_FOREGROUND);
+            init_pair(R_PAIR,      R_COLOR_FOREGROUND, R_COLOR_BACKGROUND);
+            init_pair(R_HIGHLIGHT, R_COLOR_BLUE,       R_COLOR_BACKGROUND);
         } else {
             use_default_colors();
         }

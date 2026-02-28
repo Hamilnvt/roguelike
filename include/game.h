@@ -164,7 +164,9 @@ typedef struct
     size_t *items;
     size_t count;
     size_t capacity;
-} ItemsIndices;
+} Indices;
+typedef Indices ItemsIndices;
+typedef Indices RoomConnections;
 
 typedef struct
 {
@@ -293,6 +295,19 @@ typedef struct
 
 typedef struct
 {
+    char name[32];
+    RoomConnections connections;
+} RoomDescription;
+
+typedef struct
+{
+    RoomDescription *items;
+    size_t count;
+    size_t capacity;
+} Map;
+
+typedef struct
+{
     Entity player;
 
     size_t current_room_index;
@@ -305,17 +320,8 @@ typedef struct
 
     Factions factions;
     Rooms rooms;
+    Map map;
 } Data;
-
-typedef struct
-{
-    bool enabled;
-    enum {
-        MAP_STATE_LIST,
-        MAP_STATE_CONNECTIONS,
-        __map_states_count
-    } state;
-} Map;
 
 #define MAX_MESSAGES 25
 typedef struct
@@ -335,7 +341,12 @@ typedef struct
     float save_timer;
     float switch_timer;
 
-    Map map;
+    struct {
+        bool enabled;
+        size_t index;
+        size_t offset;
+        bool show_current_connections;
+    } map;
 
     bool looking;
     bool showing_general_info;
@@ -428,10 +439,12 @@ typedef struct
     size_t width;
 } Window;
 
+extern Window win_main;
+
 typedef enum
 {
     R_PAIR = 1,
-    R_PAIR_INV,
+    R_HIGHLIGHT
 } ColorPair;
 
 typedef enum

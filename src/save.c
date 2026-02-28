@@ -340,6 +340,24 @@ bool load_rng(FILE *f, RNG *rng)
     return true;
 }
 
+void save_size_t(FILE *f, size_t *n) { fwrite(n, sizeof(size_t), 1, f); }
+bool load_size_t(FILE *f, size_t *n) { return fread(n, sizeof(size_t), 1, f) == 1; }
+
+void save_room_description(FILE *f, RoomDescription *desc)
+{
+    fwrite(desc->name, sizeof(desc->name), 1, f);
+    save_da(desc->connections, save_size_t, f);
+}
+bool load_room_description(FILE *f, RoomDescription *desc)
+{
+
+    if (fread(desc->name, sizeof(desc->name), 1, f) != 1) goto fail;
+    load_da(&desc->connections, load_size_t, f);
+    return true;
+fail:
+    return false;
+}
+
 #define SAVE_FILEPATH "./save.bin"
 void save_data()
 {
@@ -363,6 +381,7 @@ void save_data()
 
     save_da(game.data.factions, save_faction, save_file);
     save_da(game.data.rooms, save_room, save_file);
+    save_da(game.data.map, save_room_description, save_file);
 
     fclose(save_file);
     write_message("saved");
@@ -407,6 +426,8 @@ void init_data(void)
     Room *initial_room = generate_initial_room();
     game.data.current_room_index = initial_room->index;
 
+    da_push(&game.data.map, (RoomDescription){ .name = "Initial Room" });
+
     player.pos = (V2i){initial_room->width/2, initial_room->height/2};
 
     game.data.player = player;
@@ -431,6 +452,7 @@ bool load_data(void)
 
     load_da(&game.data.factions, load_faction, save_file);
     load_da(&game.data.rooms, load_room, save_file);
+    load_da(&game.data.map, load_room_description, save_file);
 
     fclose(save_file);
     return true;

@@ -1,6 +1,6 @@
 #include "game.h"
 
-static Window win_main = {0};
+Window win_main = {0};
 static Window win_bottom = {0};
 static Window win_right = {0};
 static Window *windows[] = {
@@ -48,14 +48,58 @@ static inline void update_camera(void)
     clamp_camera();
 }
 
+static void map_render(void)
+{
+    size_t line = 1;
+    for (size_t room_index = game.map.offset;
+         room_index < game.data.map.count && line < win_main.height-1;
+         room_index++)
+    {
+        bool is_room_current = room_index == CURRENT_ROOM->index;
+        const RoomDescription *desc = &game.data.map.items[room_index];
+        bool is_room_connected_to_current = false;
+        if (is_room_current) wattron(win_main.win, COLOR_PAIR(R_HIGHLIGHT));
+        else {
+            for (size_t i = 0; i < desc->connections.count; i++) {
+                if (desc->connections.items[i] == CURRENT_ROOM->index) {
+                    is_room_connected_to_current = true;
+                    wattron(win_main.win, A_DIM);
+                    break;
+                }
+            }
+        }
+        bool is_active = room_index == game.map.index;
+        if (is_active) wattron(win_main.win, A_REVERSE);
+
+        if (!game.map.show_current_connections || (is_room_current || is_room_connected_to_current)) {
+            mvwprintw(win_main.win, line++, 1, "> %zu [%s] (%s)", room_index, "TODO: room type", desc->name);
+            if (!da_is_empty(&desc->connections)) {
+                waddstr(win_main.win, ": ");
+                for (size_t i = 0; i < desc->connections.count; i++) {
+                    wprintw(win_main.win, "%zu", desc->connections.items[i]);
+                    if (i != desc->connections.count-1) waddstr(win_main.win, ", ");
+                }
+            }
+            size_t x, _; UNUSED(_);
+            getyx(win_main.win, _, x);
+            while (x < win_main.width-1) {
+                waddch(win_main.win, ' ');
+                x++;
+            }
+        }
+
+        if (is_room_current) wattroff(win_main.win, COLOR_PAIR(R_HIGHLIGHT));
+        else if (is_room_connected_to_current) wattroff(win_main.win, A_DIM);
+        if (is_active) wattroff(win_main.win, A_REVERSE);
+    }
+}
+
 void update_window_main(void)
 {
     box(win_main.win, 0, 0);
 
-    if (game.map.enabled) {
-        mvwprintw(win_main.win, win_main.height/2, win_main.width/2-10, "TODO: map");
-        map_render(); // TODO: put into the Map struct the information about the rooms and their connections
-    } else {
+    if (game.map.enabled) map_render();
+    else {
         update_camera();
 
         for (size_t screen_y = 1; screen_y < win_main.height-1; screen_y++) {
